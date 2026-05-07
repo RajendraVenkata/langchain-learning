@@ -59,7 +59,7 @@ invoke(messages, context)
 
 **Source:** `migrate-complete.md` (Pre-model hook section)
 
-Automatically summarises long conversation history when a token threshold is exceeded.
+Automatically summarises long conversation history when a token threshold is exceeded. This keeps context window usage manageable in long-running conversations.
 
 ```python
 from langchain.agents import create_agent
@@ -77,11 +77,40 @@ agent = create_agent(
 )
 ```
 
+**Breaking down the parameters:**
+
+- `model="claude-sonnet-4-6"` — the model used to summarise the history
+  - Typically the same as your agent's model (makes sense for consistency)
+  - But could be different if you want a cheaper model just for summarisation
+
+- `trigger={"tokens": 1000}` — when to trigger summarisation
+  - `"tokens": 1000` means: "When the conversation history exceeds 1000 tokens, summarise it"
+  - Tokens are how models count words (roughly 1 token ≈ 4 characters)
+  - Without this, long conversations fill up the model's context window and make responses slower/more expensive
+
+**How it works:**
+1. Each turn, the middleware checks the token count of accumulated messages
+2. If it exceeds 1000 tokens:
+   - Summarise all old messages into a shorter summary
+   - Replace the original messages with the summary
+   - Keep the most recent messages as-is (details matter more for recent context)
+3. The model never sees the full history — just "Summary of previous conversation: ..." + recent messages
+
+**When to use:**
+- Chatbots or assistants that run for many turns
+- Cost-sensitive applications (tokens = money)
+- Any agent where context window is a bottleneck
+
+**Don't use when:**
+- Conversations are naturally short
+- You need perfect recall of early history
+- The summarisation latency is too expensive
+
 ### HumanInTheLoopMiddleware
 
 **Source:** `migrate-complete.md` (Post-model hook section)
 
-Pauses agent execution before specific tool calls and waits for human approval.
+Pauses agent execution before specific tool calls and waits for human approval. Critical for any agent that can take irreversible actions.
 
 ```python
 from langchain.agents import create_agent
@@ -102,6 +131,54 @@ agent = create_agent(
     ]
 )
 ```
+
+**Breaking down the configuration:**
+
+```python
+interrupt_on={
+    "send_email": {  # ← Tool name to require approval for
+        "description": "Please review this email before sending",  # ← What to show the user
+        "allowed_decisions": ["approve", "reject"]  # ← Options the user can choose
+    }
+}
+```
+
+**What happens when the agent calls `send_email`:**
+1. Agent decides to call the `send_email` tool
+2. Middleware intercepts the call
+3. Pauses the agent loop
+4. Shows the user: "Please review this email before sending"
+5. User chooses "approve" or "reject"
+6. If "approve": tool actually runs, email gets sent
+7. If "reject": tool does NOT run, agent gets a message that the user rejected it
+
+**Using it with multiple tools:**
+
+```python
+HumanInTheLoopMiddleware(
+    interrupt_on={
+        "send_email": {
+            "description": "Please review this email before sending",
+            "allowed_decisions": ["approve", "reject"]
+        },
+        "delete_record": {
+            "description": "Confirm record deletion",
+            "allowed_decisions": ["approve", "reject", "modify"]  # ← More options
+        }
+    }
+)
+```
+
+**When to require human approval:**
+- **Writing operations:** delete, update, send, publish
+- **High-value operations:** financial transfers, account changes
+- **Irreversible operations:** anything that can't be undone
+- **Privacy-sensitive:** operations involving user data
+
+**When NOT to require approval:**
+- **Read-only operations:** fetch, search, analyze (user sees result, can judge accuracy)
+- **Low-risk operations:** formatting, simple calculations
+- Every tool requiring approval creates friction — only do it when necessary
 
 ---
 
