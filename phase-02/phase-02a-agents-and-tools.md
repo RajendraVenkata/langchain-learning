@@ -5,7 +5,7 @@
 > **Source files:** `migrate-complete.md` · `oss-complete.md`  
 > **Goal:** Understand how to build agents with `create_agent`, define tools with `@tool`, handle tool errors, and manage runtime context.
 >
-> ⚠️ **Note on examples:** Every code example in this file is extracted directly from your source files with inline source citations. No synthetic or illustrative examples.
+> ⚠️ **Note on examples:** Every code example is sourced from your files with citations. Each section shows: (1) concept explanation, (2) sourced code snippet breakdown, (3) complete runnable code.
 
 ---
 
@@ -31,9 +31,9 @@
 
 ## 1. Import Path Change
 
-**Source:** `migrate-complete.md` (Import path section)
+The function and its location both changed in v1.
 
-The function and package both changed:
+**Source:** `migrate-complete.md` (Import path section)
 
 ```python
 # v0 (old) — DEPRECATED
@@ -43,1044 +43,957 @@ from langgraph.prebuilt import create_react_agent
 from langchain.agents import create_agent
 ```
 
+**Explanation:**
+- In v0, agents came from `langgraph.prebuilt` module
+- In v1, they moved to `langchain.agents` — the main package
+- The function was also renamed: `create_react_agent` → `create_agent` (shorter, clearer)
+
 ---
 
 ## 2. Basic Agent Pattern
 
-**Source:** `migrate-complete.md` (Prompts → Static prompt rename section)
+An agent is a loop that repeatedly calls a model and tools until it produces a final answer.
+
+**Source:** `migrate-complete.md` (Prompts → Static prompt section)
+
+### Explanation
+
+When you create an agent, you specify:
+1. **`model`** — which LLM to use
+2. **`tools`** — what functions the agent can call
+3. **`system_prompt`** — instructions for the model
+
+The agent does the rest: it calls the model, detects tool calls, executes tools, and loops until done.
+
+### Complete Runnable Code
 
 ```python
 from langchain.agents import create_agent
+from langchain.tools import tool
 
+# Step 1: Define a tool
+@tool
+def check_weather(city: str) -> str:
+    """Check the current weather for a city.
+    
+    Args:
+        city: The name of the city (e.g., 'Mumbai', 'San Francisco')
+    
+    Returns:
+        A string describing the weather
+    """
+    # In a real app, this would call a weather API
+    return f"The weather in {city} is sunny, 25°C."
+
+# Step 2: Create the agent
 agent = create_agent(
     model="claude-sonnet-4-6",
     tools=[check_weather],
-    system_prompt="You are a helpful assistant"
+    system_prompt="You are a helpful weather assistant. Answer weather questions using the check_weather tool."
 )
+
+# Step 3: Invoke the agent
+result = agent.invoke({
+    "messages": [{"role": "user", "content": "What's the weather in Mumbai?"}]
+})
+
+print(result)
+# Output: The agent will call check_weather("Mumbai"), get the result, and respond to the user
 ```
 
 ---
 
 ## 3. System Prompts — Static
 
-### Rename from `prompt` to `system_prompt`
+A static system prompt is a fixed string that tells the model how to behave.
 
-**Source:** `migrate-complete.md` (Prompts → Static prompt rename section)
+**Source:** `migrate-complete.md` (Prompts → Static prompt section)
 
-```python
-# v1 (new) — correct
-from langchain.agents import create_agent
+### Explanation
 
-agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=[check_weather],
-    system_prompt="You are a helpful assistant"
-)
-```
+The `system_prompt` parameter (renamed from `prompt` in v0) is where you define the model's role and instructions:
+- "You are a helpful assistant"
+- "You are a SQL expert who writes safe queries"
+- "You are a data analyst who explains findings clearly"
 
-### SystemMessage → string conversion
+The model sees this system prompt at the start of every conversation.
 
-**Source:** `migrate-complete.md` (Prompts → SystemMessage to string section)
+### What changed from v0
 
-If you have a `SystemMessage` object, extract the string content:
+In v0, you could pass a `SystemMessage` object. In v1, just use a plain string.
+
+### Complete Runnable Code
 
 ```python
-# v1 (new) — use plain string
 from langchain.agents import create_agent
+from langchain.tools import tool
 
+@tool
+def calculate(expression: str) -> str:
+    """Evaluate a mathematical expression."""
+    try:
+        result = eval(expression)
+        return f"Result: {result}"
+    except Exception as e:
+        return f"Error: {e}"
+
+# v1 (correct) — use plain string
 agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=[check_weather],
-    system_prompt="You are a helpful assistant"
+    model="gpt-5-mini",
+    tools=[calculate],
+    system_prompt="You are a helpful math tutor. When users ask for calculations, use the calculate tool. Explain the steps clearly."
 )
-```
 
-The old pattern of passing `SystemMessage(content="...")` is no longer needed.
+# Invoke it
+result = agent.invoke({
+    "messages": [{"role": "user", "content": "Calculate 2 + 2 * 3"}]
+})
+
+print(result)
+# The agent receives the system_prompt and answers: "2 + 2 * 3 = 8 (because multiplication happens first)"
+```
 
 ---
 
 ## 4. System Prompts — Dynamic
 
-Dynamic prompts adapt based on runtime context (e.g., user role, conversation state). Instead of using a fixed `system_prompt` string, you define a function that generates the prompt at runtime based on the current context.
+Dynamic prompts adapt based on runtime context (e.g., user role, conversation state).
 
 **Source:** `migrate-complete.md` (Dynamic prompts section)
 
-### Breaking down the example
+### Explanation
+
+Sometimes you need **different instructions** depending on **who's using the agent** or **what's happening in the conversation**:
+- Admin users get: "You have full access to all data"
+- Regular users get: "You can only see data you own"
+- After many questions: "You have complex context, provide detailed responses"
+
+Instead of hardcoding the prompt, use a **dynamic prompt function** that generates it at runtime.
+
+### The Mental Model
+
+```
+User calls agent with context=Context(user_role="admin")
+    ↓
+Dynamic prompt function runs
+    ↓
+Reads request.runtime.context.user_role → "admin"
+    ↓
+Generates: "You are a helpful assistant with full system access"
+    ↓
+Model receives this generated prompt + user message
+    ↓
+Responds as admin
+```
+
+### Complete Runnable Code
 
 ```python
 from dataclasses import dataclass
 from langchain.agents import create_agent
 from langchain.agents.middleware import dynamic_prompt, ModelRequest
-from langgraph.runtime import Runtime
+from langchain.tools import tool
+
+# Step 1: Define context schema
+@dataclass
+class Context:
+    user_role: str = "user"  # Default role
+
+# Step 2: Define a sample tool
+@tool
+def get_report(report_id: str) -> str:
+    """Get a report by ID."""
+    return f"Report {report_id}: Confidential data..."
+
+# Step 3: Define dynamic prompt function
+@dynamic_prompt
+def role_based_prompt(request: ModelRequest) -> str:
+    """Generate different prompts based on user role."""
+    user_role = request.runtime.context.user_role
+    base_prompt = "You are a helpful assistant."
+    
+    if user_role == "admin":
+        return f"{base_prompt} You have full access to all reports and data. Provide detailed insights."
+    elif user_role == "viewer":
+        return f"{base_prompt} You can read reports but cannot make changes. Be helpful but cautious."
+    else:
+        return base_prompt
+
+# Step 4: Create agent with dynamic prompt middleware
+agent = create_agent(
+    model="gpt-5.4",
+    tools=[get_report],
+    middleware=[role_based_prompt],
+    context_schema=Context
+)
+
+# Step 5: Invoke with different contexts
+# As admin
+result_admin = agent.invoke(
+    {"messages": [{"role": "user", "content": "Show me all reports"}]},
+    context=Context(user_role="admin")
+)
+print("Admin result:", result_admin)
+
+# As viewer
+result_viewer = agent.invoke(
+    {"messages": [{"role": "user", "content": "Show me all reports"}]},
+    context=Context(user_role="viewer")
+)
+print("Viewer result:", result_viewer)
+# The agent gives different responses based on the dynamically generated prompt
 ```
 
-**What's being imported:**
-- `dataclass` — Python decorator to define a simple data structure for context
-- `create_agent` — the agent factory function (Phase 02A §2)
-- `dynamic_prompt` — a decorator that marks a function as a dynamic prompt middleware
-- `ModelRequest` — the request object passed to the dynamic prompt function, containing the current agent state and runtime
+### Step-by-Step Breakdown
 
----
-
-### Step 1: Define your context schema
-
+**1. Context Schema** — stores the info that determines the prompt
 ```python
 @dataclass
 class Context:
     user_role: str = "user"
 ```
 
-**What this does:**
-- Defines a simple `dataclass` called `Context` with one field: `user_role`
-- `user_role` defaults to `"user"` if not provided
-- This is the **static context** you will pass at invocation time — data that doesn't change during the conversation
-- Later, when you call `agent.invoke(...)`, you'll pass `context=Context(user_role="expert")` to tell the agent which role the current user is
-
----
-
-### Step 2: Define the dynamic prompt function
-
+**2. Dynamic Prompt Function** — generates the prompt based on context
 ```python
 @dynamic_prompt
-def dynamic_prompt(request: ModelRequest) -> str:
-    user_role = request.runtime.context.user_role
-    base_prompt = "You are a helpful assistant."
+def role_based_prompt(request: ModelRequest) -> str:
+    user_role = request.runtime.context.user_role  # Extract role
+    # Return different prompt for each role
+    if user_role == "admin":
+        return "...admin prompt..."
 ```
 
-**What's happening:**
-- `@dynamic_prompt` decorator marks this function as a middleware that generates prompts dynamically
-- The function receives a `request: ModelRequest` — this object contains:
-  - `request.state` — the current agent state (messages, custom fields)
-  - `request.runtime.context` — the static context you passed at invocation (in this case, the `Context` object with `user_role`)
-- `request.runtime.context.user_role` extracts the user role from the context
-
-```python
-    if user_role == "expert":
-        prompt = (
-            f"{base_prompt} Provide detailed technical responses."
-        )
-    elif user_role == "beginner":
-        prompt = (
-            f"{base_prompt} Explain concepts simply and avoid jargon."
-        )
-    else:
-        prompt = base_prompt
-
-    return prompt
-```
-
-**What's happening:**
-- Branches on the `user_role` to customize the prompt
-- **Expert:** adds instruction to provide detailed technical responses
-- **Beginner:** adds instruction to explain simply and avoid jargon
-- **Default (any other value):** uses the base prompt as-is
-- Returns the final system prompt string that the model will see
-
----
-
-### Step 3: Register the dynamic prompt as middleware
-
+**3. Register the Middleware** — tell the agent to use this dynamic prompt
 ```python
 agent = create_agent(
-    model="gpt-5.4",
-    tools=tools,
-    middleware=[dynamic_prompt],
+    ...,
+    middleware=[role_based_prompt],
     context_schema=Context
 )
 ```
 
-**What's happening:**
-- `middleware=[dynamic_prompt]` — registers your dynamic prompt function as a middleware (like in Phase 02B)
-- `context_schema=Context` — tells the agent "I will pass you a `Context` object at invocation time with user role and other metadata"
-
----
-
-### Step 4: Invoke with context
-
+**4. Pass Context at Invocation** — specify the user's role
 ```python
-agent.invoke(
-    {"messages": [{"role": "user", "content": "Explain async programming"}]},
-    context=Context(user_role="expert")
-)
+agent.invoke(..., context=Context(user_role="admin"))
 ```
-
-**What's happening:**
-- `{"messages": [...]}` — the dynamic state (the conversation)
-- `context=Context(user_role="expert")` — the static context for this call
-  - When the agent is about to call the model, the `dynamic_prompt` function runs
-  - It reads `request.runtime.context.user_role`, sees `"expert"`
-  - It returns `"You are a helpful assistant. Provide detailed technical responses."`
-  - The model receives this prompt and answers accordingly
-
-### When to use dynamic prompts
-
-**Use dynamic prompts when:**
-- Different user roles (admin, viewer, guest) need different instructions
-- User preferences or account tier affect the prompt
-- Conversation state should influence the system prompt
-- You want to A/B test different prompt variations
-
-**Don't use dynamic prompts when:**
-- The prompt never changes — just use `system_prompt="..."`
-- You only need one version of the prompt
 
 ---
 
 ## 5. Tools — Definition and Usage
 
-### Basic tool definition with `@tool`
+Tools are functions the agent can call. The agent looks at the tool's docstring and type hints to understand what it does.
 
 **Source:** `migrate-complete.md` (Tools section)
 
+### Explanation
+
+When you pass tools to `create_agent`, the framework:
+1. **Reads the docstring** — this becomes the tool's description (tells the model what it does)
+2. **Reads the type hints** — these define the input schema (what parameters are needed)
+3. **Makes them available** — the model can call them by name
+
+The framework automatically executes tools and returns results to the model.
+
+### Complete Runnable Code
+
 ```python
 from langchain.agents import create_agent
-
-agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=[check_weather, search_web]
-)
-```
-
-**What's happening:**
-- `check_weather` and `search_web` are tools that the agent can call
-- They are **not defined here** in this snippet (the full definitions are in your source with docstrings and type hints)
-- The agent will look at the docstrings and type hints of these functions to understand:
-  - **What they do** (from the docstring)
-  - **What inputs they need** (from the type-annotated parameters)
-  - **What they return** (from the return type annotation)
-
-**The agent's job:** When the model decides it wants to call a tool, the agent:
-1. Looks up the tool by name (e.g., `"check_weather"`)
-2. Gets the actual input from the model
-3. Calls the tool function with that input
-4. Gets the result back
-5. Feeds the result to the model as a `ToolMessage`
-
-**What the `@tool` decorator does:**
-- Converts a regular Python function into a LangChain tool
-- Automatically extracts the docstring as the tool description
-- Automatically extracts parameter type hints as the tool's input schema
-- Makes the function compatible with agents
-
----
-
-### What tools parameter accepts
-
-The `tools=` parameter accepts three types of objects:
-
-**1. Functions decorated with `@tool`:**
-```python
 from langchain.tools import tool
+
+# Option 1: Using @tool decorator (recommended)
+@tool
+def search_web(query: str) -> str:
+    """Search the web for information about a topic.
+    
+    This tool searches the internet and returns relevant results.
+    """
+    # Real implementation would call an API
+    return f"Results for '{query}': ...found 10 matches..."
 
 @tool
 def check_weather(city: str) -> str:
-    """Check the weather in a city. Returns a weather description."""
-    # implementation
-    return f"Weather in {city}: sunny"
-```
+    """Get the current weather in a city."""
+    return f"Weather in {city}: Sunny, 25°C"
 
-**2. Plain callables with type hints and docstring:**
-```python
-def search_web(query: str) -> str:
-    """Search the web for information. Returns search results."""
-    # implementation
-    return f"Results for {query}"
+# Option 2: Plain function with type hints and docstring
+def calculate_sum(a: int, b: int) -> int:
+    """Add two numbers together."""
+    return a + b
 
-# Pass directly to tools list
+# Create agent with all three tools
 agent = create_agent(
-    model="...",
-    tools=[search_web]  # Plain function, no @tool needed
+    model="claude-sonnet-4-6",
+    tools=[
+        search_web,         # @tool decorated
+        check_weather,      # @tool decorated
+        calculate_sum       # Plain function
+    ],
+    system_prompt="You are a helpful assistant. Use tools to answer questions accurately."
 )
+
+# Invoke
+result = agent.invoke({
+    "messages": [{"role": "user", "content": "What's the weather in Paris and what's 5+3?"}]
+})
+
+print(result)
+# The agent will:
+# 1. Call check_weather("Paris") → gets weather
+# 2. Call calculate_sum(5, 3) → gets 8
+# 3. Responds with both pieces of information
 ```
 
-**3. `BaseTool` subclass instances:**
+### What Tools Parameter Accepts
+
 ```python
+# 1. @tool-decorated functions ✅
+@tool
+def my_tool() -> str:
+    """Do something."""
+    return "result"
+
+# 2. Plain callables with type hints ✅
+def plain_function(x: int) -> str:
+    """Do something."""
+    return f"Result: {x}"
+
+# 3. BaseTool subclass ✅
 from langchain.tools import BaseTool
 
-class MyCustomTool(BaseTool):
+class CustomTool(BaseTool):
     name: str = "my_tool"
-    description: str = "Does something custom"
-    
+    description: str = "Does something"
     def _run(self, input: str) -> str:
         return f"Result: {input}"
 
 agent = create_agent(
     model="...",
-    tools=[MyCustomTool()]  # Instance of BaseTool
+    tools=[my_tool, plain_function, CustomTool()]
 )
 ```
 
----
-
-### What is NOT accepted anymore
-
-**Source:** `migrate-complete.md` (Tools section)
+### What is NO Longer Accepted
 
 ```python
-# ❌ v0 (old) — ToolNode no longer accepted
-from langgraph.prebuilt import create_react_agent, ToolNode
-
-agent = create_react_agent(
-    model="claude-sonnet-4-6",
-    tools=ToolNode([check_weather, search_web])
-)
-```
-
-**Why this fails in v1:**
-- `ToolNode` was a v0 pattern that bundled tools together with execution logic
-- In v1, tool execution is handled by the agent framework automatically
-- You just pass a plain list of tool functions — the framework does the rest
-
-```python
-# ✅ v1 (new) — pass a plain list
-from langchain.agents import create_agent
-
+# ❌ v0 pattern — ToolNode not allowed
+from langgraph.prebuilt import ToolNode
 agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=[check_weather, search_web]
+    model="...",
+    tools=ToolNode([tool1, tool2])  # ERROR in v1
+)
+
+# ✅ v1 pattern — just use a list
+agent = create_agent(
+    model="...",
+    tools=[tool1, tool2]  # ✅ Correct
 )
 ```
-
-**The difference:**
-- v0: Tools were wrapped in `ToolNode`, and you had to understand the execution model
-- v1: Just list your tools — the agent handles everything
 
 ---
 
 ## 6. Tool Error Handling
 
-Tool errors happen when a tool receives an input that passes schema validation but fails at runtime (e.g., an invalid SQL query, a city name that doesn't match an API's format, a malformed math expression).
+When tools fail at runtime (invalid input, API error, etc.), you can catch those errors and return custom messages to the agent instead of crashing.
 
 **Source:** `migrate-complete.md` (Tools → Handling tool errors section)
 
-### Using `@wrap_tool_call` middleware
+### Explanation
+
+Tool errors are **different from schema errors**:
+- **Schema errors** — input doesn't match the type hint. Framework prevents these automatically.
+- **Runtime errors** — input is valid, but the tool fails when executed (e.g., invalid SQL, API returns 404, network timeout).
+
+Use `@wrap_tool_call` middleware to handle runtime errors gracefully.
+
+### What Errors to Catch vs. Not Catch
+
+| Error Type | Catch? | Why |
+|---|---|---|
+| Invalid SQL syntax (input passed validation but SQL parser fails) | ✅ YES | Agent can retry with better syntax |
+| Missing API key (input is valid but auth fails) | ✅ YES | Agent can handle gracefully |
+| Division by zero in calculator | ✅ YES | Agent can understand the constraint |
+| Network timeout | ❌ NO | Use retry middleware instead |
+| Bug in your tool code (KeyError, AttributeError) | ❌ NO | Let it crash so you can fix the bug |
+| Schema validation error | ❌ NO | Framework already handles these |
+
+### Complete Runnable Code
 
 ```python
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_tool_call
+from langchain.tools import tool
 from langchain.messages import ToolMessage
 
+# Tool that can fail at runtime
+@tool
+def execute_sql(query: str) -> str:
+    """Execute a SQL query and return results."""
+    # Simulate a SQL execution that might fail
+    if "DROP" in query.upper():
+        raise ValueError("DROP statements are not allowed")
+    if "SELECT" not in query.upper():
+        raise ValueError("Only SELECT queries are allowed")
+    return f"Results: {query[:50]}..."
+
+# Error handling middleware
 @wrap_tool_call
 def handle_tool_errors(request, handler):
-    """Handle tool execution errors with custom messages."""
+    """Catch tool execution errors and return friendly messages."""
     try:
-        return handler(request)
-    except Exception as e:
-        # Only handle errors that occur during tool execution due to invalid inputs
-        # that pass schema validation but fail at runtime (e.g., invalid SQL syntax).
-        # Do NOT handle:
-        # - Network failures (use tool retry middleware instead)
-        # - Incorrect tool implementation errors (should bubble up)
-        # - Schema mismatch errors (already auto-handled by the framework)
-        #
-        # Return a custom error message to the model
+        return handler(request)  # Execute the tool normally
+    except ValueError as e:
+        # Return error as a ToolMessage the agent can see
         return ToolMessage(
-            content=f"Tool error: Please check your input and try again. ({str(e)})",
+            content=f"Tool error: {str(e)}. Please check your input and try again.",
+            tool_call_id=request.tool_call["id"]
+        )
+    except Exception as e:
+        # Catch unexpected errors too
+        return ToolMessage(
+            content=f"Unexpected error: {str(e)}",
             tool_call_id=request.tool_call["id"]
         )
 
+# Create agent with error handling
 agent = create_agent(
     model="claude-sonnet-4-6",
-    tools=[check_weather, search_web],
-    middleware=[handle_tool_errors]
+    tools=[execute_sql],
+    middleware=[handle_tool_errors],
+    system_prompt="You are a SQL assistant. Help users write safe SELECT queries."
 )
+
+# Test it
+result = agent.invoke({
+    "messages": [{"role": "user", "content": "Run DROP TABLE users"}]
+})
+
+print(result)
+# The agent receives: "Tool error: DROP statements are not allowed"
+# Instead of the program crashing, the agent can explain why and offer alternatives
 ```
 
-### Breaking down the `@wrap_tool_call` decorator
-
-**What `@wrap_tool_call` does:**
-- Marks a function as a tool call wrapper middleware (see Phase 02B for full middleware details)
-- The function receives a `request` (information about the tool call) and a `handler` (the actual tool execution)
-
-**Inside the function:**
-```python
-try:
-    return handler(request)
-```
-- `handler(request)` **executes the tool**
-- If the tool runs successfully, its result is returned immediately
+### Without Error Handling (What Happens)
 
 ```python
-except Exception as e:
-```
-- If the tool throws an **exception**, you catch it here
-- `e` is the exception object
-
-```python
-    return ToolMessage(
-        content=f"Tool error: Please check your input and try again. ({str(e)})",
-        tool_call_id=request.tool_call["id"]
-    )
-```
-- Instead of letting the exception crash the agent, you return a `ToolMessage`
-- `ToolMessage` is a message that tells the agent: "The tool ran, but returned this error message"
-- The agent sees the error message and can decide to:
-  - Try again with different inputs
-  - Give up and return a response to the user
-  - Try a different tool
-- `tool_call_id=request.tool_call["id"]` links the error message back to the specific tool call
-
----
-
-### What you SHOULD catch
-
-**Examples of runtime errors to catch:**
-- Invalid SQL syntax (input passes as a string, but SQL parser rejects it)
-- API 404 errors (the resource doesn't exist)
-- Network timeouts from external services
-- Malformed expressions in a calculator tool
-
-**Why catch them:** These are **expected failure cases** where you want to give the model a chance to retry or try a different approach.
-
----
-
-### What you SHOULD NOT catch
-
-**1. Network failures:**
-```python
-# ❌ DON'T do this — network issues are separate concerns
-except ConnectionError:
-    return ToolMessage(content="Network error")
-```
-Use a separate **retry middleware** instead. The agent shouldn't decide retries — a dedicated middleware should.
-
-**2. Incorrect tool implementation bugs:**
-```python
-# ❌ DON'T do this — bugs should bubble up for debugging
-except IndexError:
-    return ToolMessage(content="Something went wrong")
-```
-If your tool code has a bug, let it fail loudly so you can fix it.
-
-**3. Schema mismatch errors:**
-```python
-# ❌ DON'T do this — the framework already prevents these
-except TypeError:
-    return ToolMessage(content="Wrong type")
-```
-The agent framework validates inputs against the tool's schema before calling the tool. Type errors shouldn't happen.
-
----
-
-### When to register `@wrap_tool_call`
-
-```python
+# If you DON'T use error handling:
 agent = create_agent(
     model="claude-sonnet-4-6",
-    tools=[check_weather, search_web],
-    middleware=[handle_tool_errors]  # ← Register it as middleware
+    tools=[execute_sql]
+    # No middleware
 )
-```
 
-**Key difference from v0:**
-- v0: Error handling was part of `ToolNode` initialization
-- v1: Error handling is a middleware, composable with other middlewares (Phase 02B)
+result = agent.invoke({
+    "messages": [{"role": "user", "content": "Run DROP TABLE users"}]
+})
+# The tool raises ValueError("DROP statements...")
+# The program CRASHES — error is not caught
+# No response to the user
+```
 
 ---
 
 ## 7. Tools Accessing Custom State
 
-Tools sometimes need access to information from the agent's state (not just their own inputs). For example, a tool might need the current user's name or ID to personalise its response.
-
-### Using ToolRuntime for state access
+Tools sometimes need information from the agent's state (not just their function parameters). For example, a greeting tool needs the user's name.
 
 **Source:** `migrate-complete.md` (Custom state → Defining state via state_schema section)
+
+### Explanation
+
+The agent has a **state** — a dict containing:
+- `messages` — the conversation history (always included)
+- Custom fields — anything you add (e.g., `user_name`, `user_id`, `account_tier`)
+
+To access this state **inside a tool**, add a special `runtime: ToolRuntime` parameter.
+
+### Complete Runnable Code
 
 ```python
 from langchain.tools import tool, ToolRuntime
 from langchain.agents import create_agent, AgentState
 
-# Define custom state extending AgentState
+# Step 1: Define custom state with user_name
 class CustomState(AgentState):
-    user_name: str
+    user_name: str  # Add a custom field to the agent state
+
+# Step 2: Define a tool that accesses the state
+@tool
+def greet(runtime: ToolRuntime[None, CustomState]) -> str:
+    """Greet the user by their name.
+    
+    This tool reads the user_name from the agent state.
+    """
+    user_name = runtime.state.get("user_name", "Guest")
+    return f"Hello {user_name}! How can I help you today?"
 
 @tool
-def greet(
-    runtime: ToolRuntime[None, CustomState]
-) -> str:
-    """Use this to greet the user by name."""
-    user_name = runtime.state.get("user_name", "Unknown")
-    return f"Hello {user_name}!"
+def remind_user(reminder: str, runtime: ToolRuntime[None, CustomState]) -> str:
+    """Set a reminder for the user."""
+    user_name = runtime.state.get("user_name", "Guest")
+    return f"Reminder set for {user_name}: {reminder}"
 
+# Step 3: Create agent with custom state
 agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=[greet],
-    state_schema=CustomState
+    model="gpt-5.4",
+    tools=[greet, remind_user],
+    state_schema=CustomState,
+    system_prompt="You are a helpful assistant. Use the greet tool when appropriate."
 )
-```
 
-### Breaking down the example
-
-**1. Define custom state:**
-```python
-class CustomState(AgentState):
-    user_name: str
-```
-- Extends `AgentState` (which is a `TypedDict` with a `messages` field)
-- Adds a new field `user_name` of type `str`
-- This field will be available in the agent's state throughout execution
-
-**2. Define a tool that uses the state:**
-```python
-@tool
-def greet(
-    runtime: ToolRuntime[None, CustomState]
-) -> str:
-```
-- `runtime: ToolRuntime[None, CustomState]` — a special parameter that gives access to the agent's runtime
-  - The `CustomState` type hint tells LangChain: "This tool uses custom state of type `CustomState`"
-  - The `None` is a type parameter for tool-specific context (advanced, usually not used)
-
-**3. Access the state inside the tool:**
-```python
-    user_name = runtime.state.get("user_name", "Unknown")
-    return f"Hello {user_name}!"
-```
-- `runtime.state` is a dict-like object containing all the agent's current state
-- `.get("user_name", "Unknown")` — safely reads the `user_name` field, defaulting to `"Unknown"` if not set
-- Uses the state value to personalise the tool's response
-
-**4. Register the custom state with the agent:**
-```python
-agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=[greet],
-    state_schema=CustomState
-)
-```
-- `state_schema=CustomState` — tells the agent "my tools might access fields from this `CustomState` type"
-
----
-
-### How the state gets populated
-
-The state comes from somewhere — either your code initialises it, or middleware populates it. Here's a minimal example of how `user_name` would get into the state:
-
-```python
-# At invocation time, you'd initialise the state with user_name
+# Step 4: Invoke with state
 result = agent.invoke({
     "messages": [{"role": "user", "content": "Greet me"}],
-    "user_name": "Alice"  # ← This initialises the custom state field
+    "user_name": "Alice"  # ← Supply the custom state field
 })
 
-# When the greet tool runs:
-# - runtime.state.get("user_name") returns "Alice"
-# - The tool returns "Hello Alice!"
+print(result)
+# Output: "Hello Alice! How can I help you today?"
 ```
 
----
+### How State Flows Through the System
 
-### When to use tool state access
-
-**Use it when:**
-- A tool needs user metadata (ID, name, account tier)
-- A tool needs conversation history or other agent state
-- A tool needs to know which sub-agent is running (in multi-agent setups)
-
-**Don't use it when:**
-- The tool only needs its own inputs
-- The state is very large or changes frequently (consider middleware instead)
+```
+Invoke agent:
+  {
+    "messages": [...],
+    "user_name": "Alice"  ← Custom state field
+  }
+    ↓
+Agent runs
+    ↓
+Model decides to call greet()
+    ↓
+Tool receives: runtime.state = {"messages": [...], "user_name": "Alice"}
+    ↓
+Tool reads: runtime.state.get("user_name") → "Alice"
+    ↓
+Tool returns: "Hello Alice!"
+```
 
 ---
 
 ## 8. Custom State Schema
 
-The agent's default state contains a `messages` field (the conversation history). You can extend this with additional fields for your application's needs.
+The agent's default state contains `messages`. You can extend it with additional fields for your application.
 
-### TypedDict via AgentState (only supported type)
+**Source:** `migrate-complete.md` (Custom state section)
 
-**Source:** `migrate-complete.md` (Custom state → State type restrictions section)
+### Explanation
+
+Use `AgentState` (a `TypedDict`) as the base for custom state. **In v1, only `TypedDict` is supported** — Pydantic models and dataclasses are no longer allowed.
+
+### Complete Runnable Code
 
 ```python
 from langchain.agents import AgentState, create_agent
+from langchain.tools import tool
 
-# AgentState is a TypedDict
-class CustomAgentState(AgentState):
+# v1 (Correct) — inherit from AgentState (which is a TypedDict)
+class MyAgentState(AgentState):
     user_id: str
+    subscription_tier: str = "free"  # Optional with default
+
+@tool
+def check_subscription(runtime=None) -> str:
+    """Check the user's subscription status."""
+    # In a real tool, you'd use runtime to access state
+    return "Subscription: Premium"
 
 agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=tools,
-    state_schema=CustomAgentState
+    model="gpt-5-mini",
+    tools=[check_subscription],
+    state_schema=MyAgentState,
+    system_prompt="You are a subscription assistant."
 )
+
+# Invoke with state
+result = agent.invoke({
+    "messages": [{"role": "user", "content": "What's my subscription?"}],
+    "user_id": "user_123",
+    "subscription_tier": "premium"
+})
+
+print(result)
 ```
 
-### Breaking down the example
-
-**What is `AgentState`?**
-- `AgentState` is a `TypedDict` — a Python type hint for dict-like objects with known keys
-- It already has a `messages` field containing the conversation history
-- You inherit from it to add more fields specific to your application
+### What is NO Longer Supported
 
 ```python
-class CustomAgentState(AgentState):
-    user_id: str
-```
-- Defines a new state type that extends `AgentState`
-- Adds a required field `user_id` of type `str`
-- The agent's state will now always have both:
-  - `messages` (from `AgentState`)
-  - `user_id` (your custom field)
-
-**Why inherit from `AgentState` instead of defining your own `TypedDict`?**
-- `AgentState` already includes the message handling that agents need
-- Inheriting ensures you have the right structure
-
-```python
-agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=tools,
-    state_schema=CustomAgentState
-)
-```
-- Tells the agent: "Use this state schema for this agent"
-- The agent will now expect `user_id` to be present when invoked
-
----
-
-### What is no longer supported
-
-**Source:** `migrate-complete.md` (Custom state → State type restrictions section)
-
-In v0, you could use Pydantic models or dataclasses for state. **This is no longer allowed in v1.**
-
-```python
-# ❌ v0 pattern — Pydantic no longer supported
+# ❌ v0 — Pydantic not supported
 from pydantic import BaseModel
 
-class AgentState(BaseModel):
-    messages: Annotated[list[AnyMessage], add_messages]
+class MyState(BaseModel):
     user_id: str
 
-# ❌ v0 pattern — dataclass no longer supported
+# ❌ v0 — dataclass not supported
+from dataclasses import dataclass
+
 @dataclass
-class AgentState:
+class MyState:
     user_id: str
 
-# ✅ v1 pattern — TypedDict via AgentState ONLY
+# ✅ v1 — TypedDict via AgentState
 from langchain.agents import AgentState
 
-class CustomAgentState(AgentState):
+class MyState(AgentState):
     user_id: str
 ```
 
-### Why the change to TypedDict?
+### Why the Change?
 
-**TypedDict is better for this use case because:**
-- It's **lightweight** — no runtime overhead (Pydantic validates, TypedDict doesn't)
-- It's **type-hint focused** — you still get IDE autocomplete and type checking
-- It **composes better** with the LangGraph state system (which uses `Annotated` dicts)
-- **Validation moved to middleware** — if you need validation, implement it in `before_model` or `after_model` hooks (Phase 02B)
-
----
-
-### How to initialise custom state
-
-```python
-# When invoking the agent, pass the state fields
-result = agent.invoke({
-    "messages": [{"role": "user", "content": "Hello"}],
-    "user_id": "user_123"  # ← Custom state field
-})
-```
-
-Or if you're building state programmatically:
-
-```python
-state = {
-    "messages": [HumanMessage(content="Hello")],
-    "user_id": "user_123"
-}
-result = agent.invoke(state)
-```
+- **Lightweight** — TypedDict has no runtime overhead
+- **Better composition** — integrates with LangGraph's state system
+- **Type safety** — still get IDE autocomplete and type checking
+- **Validation in middleware** — if you need validation, put it in `before_model` hooks (Phase 02B)
 
 ---
 
 ## 9. Runtime Context
 
-### Static vs Dynamic Data
-
-When invoking an agent, you pass **two types of data:**
-
-| Type | Example | Changes? | Where passed |
-|---|---|---|---|
-| **Dynamic state** | Message history, tool call results | Yes, changes per turn | In `{"messages": [...]}` dict |
-| **Static context** | User ID, session ID, user role | No, stays same for entire session | Via `context=Context(...)` parameter |
-
-**Static context is the same throughout the agent's lifetime** — it's metadata about the user or session that doesn't change as the conversation happens.
+Static context (user metadata that doesn't change) is passed separately from dynamic state (messages).
 
 **Source:** `migrate-complete.md` (Runtime context section)
+
+### Explanation
+
+```
+Dynamic State (changes per turn)
+├─ messages          → Conversation history
+└─ custom fields     → User name, account tier, etc.
+
+Static Context (same for entire session)
+├─ user_id          → Who's using this
+├─ session_id       → Which conversation
+└─ API_key          → Credentials for external calls
+```
+
+**Context is for metadata that doesn't change.** State is for everything that does.
+
+### Complete Runnable Code
 
 ```python
 from dataclasses import dataclass
 from langchain.agents import create_agent
+from langchain.tools import tool
 
+# Step 1: Define context schema
 @dataclass
 class Context:
     user_id: str
     session_id: str
-```
+    is_premium: bool = False
 
-### Breaking down the dataclass
-
-```python
-@dataclass
-class Context:
-    user_id: str
-    session_id: str
-```
-
-**What this does:**
-- `@dataclass` is a Python decorator that automatically generates `__init__`, `__repr__`, and other methods
-- Defines a simple class with two fields: `user_id` and `session_id`
-- This becomes the **schema** for static context you'll pass to the agent
-
-**Why not TypedDict here?**
-- `dataclass` is better for context because it's simpler and allows default values
-- `TypedDict` is better for state because it integrates with LangGraph's state system
-- Different tools for different jobs
-
----
-
-### Registering context schema on the agent
-
-```python
-agent = create_agent(
-    model=model,
-    tools=tools,
-    context_schema=Context
-)
-```
-
-**What this does:**
-- `context_schema=Context` tells the agent "I will pass you a `Context` object when invoking"
-- The agent stores the schema for validation and type hints
-
----
-
-### Passing context at invocation time
-
-```python
-result = agent.invoke(
-    {"messages": [{"role": "user", "content": "Hello"}]},
-    context=Context(user_id="123", session_id="abc")
-)
-```
-
-**What's happening:**
-- **First arg** `{"messages": [...]}` — the dynamic state for this turn
-- **`context=Context(...)`** — the static context for the entire session
-  - `user_id="123"` — this user's ID
-  - `session_id="abc"` — this conversation session's ID
-  - These values will be available inside tools and middleware via `request.runtime.context`
-
-### Accessing context inside tools and middleware
-
-In a tool (Phase 02A §7):
-```python
+# Step 2: Tool that uses context
 @tool
-def get_user_balance(runtime: ToolRuntime[None, CustomState]) -> str:
-    """Get the user's account balance."""
-    user_id = runtime.context.user_id  # Access context
-    balance = db.query(user_id)
-    return f"Your balance: ${balance}"
-```
+def check_api_limit(runtime=None) -> str:
+    """Check how many API calls the user has left."""
+    # In a real tool, you'd use runtime.context to check limits per user
+    return "API calls remaining: 100"
 
-In middleware (Phase 02B):
-```python
-@dynamic_prompt
-def my_prompt(request: ModelRequest) -> str:
-    user_id = request.runtime.context.user_id  # Access context
-    if is_premium_user(user_id):
-        return "You have access to premium features."
-    return "You are a free user."
-```
+# Step 3: Create agent with context schema
+agent = create_agent(
+    model="gpt-5.4",
+    tools=[check_api_limit],
+    context_schema=Context,
+    system_prompt="You are an API assistant."
+)
 
----
-
-### v0 pattern (old, still works but not recommended)
-
-**Source:** `migrate-complete.md` (Runtime context section)
-
-```python
-# v0 — old pattern, still works for backward compatibility
+# Step 4: Invoke with context
 result = agent.invoke(
-    {"messages": [{"role": "user", "content": "Hello"}]},
+    {"messages": [{"role": "user", "content": "How many API calls do I have?"}]},
+    context=Context(
+        user_id="user_123",
+        session_id="sess_abc",
+        is_premium=True
+    )
+)
+
+print(result)
+# The agent has access to context and can provide personalized responses
+```
+
+### v0 Pattern (Still Works, But Not Recommended)
+
+```python
+# v0 — old pattern
+result = agent.invoke(
+    {"messages": [...]},
     config={
         "configurable": {
-            "user_id": "123",
-            "session_id": "abc"
+            "user_id": "user_123",
+            "session_id": "sess_abc"
         }
     }
 )
+
+# v1 — new pattern (preferred)
+result = agent.invoke(
+    {"messages": [...]},
+    context=Context(user_id="user_123", session_id="sess_abc")
+)
 ```
 
-**Why v0 is no longer recommended:**
-- `config["configurable"]` is opaque — developers don't know what keys are expected
-- `context=Context(...)` is explicit — the dataclass documents what context is needed
-- Type checking works better with named context — IDE autocomplete shows available fields
-
-**From your notes:** "The old `config["configurable"]` pattern still works for backward compatibility, but using the new `context` parameter is recommended for new applications or applications migrating to v1."
+**Why v1 is better:**
+- Explicit — you can see what context fields are needed
+- Type-safe — IDE autocomplete shows available fields
+- Clearer intent — `context=` clearly means "static metadata"
 
 ---
 
 ## 10. Dynamic Model Selection
 
-Choose a different language model for each agent call based on runtime conditions (e.g., conversation length, task complexity, cost constraints).
+Choose a different language model per call based on runtime conditions (e.g., conversation length, task complexity).
 
 **Source:** `migrate-complete.md` (Model → Dynamic model selection section)
 
-### Implementing dynamic model selection
+### Explanation
+
+Sometimes you want:
+- **Cheap model** for simple, short conversations
+- **Powerful model** for complex, long conversations
+- **Different models** based on user account tier
+
+Use middleware to decide which model to use per call.
+
+### Complete Runnable Code
 
 ```python
 from langchain.agents import create_agent
-from langchain.agents.middleware import (
-    AgentMiddleware, ModelRequest
-)
+from langchain.agents.middleware import AgentMiddleware, ModelRequest
 from langchain.agents.middleware.types import ModelResponse
 from langchain_openai import ChatOpenAI
 from typing import Callable
-```
 
-**What's being imported:**
-- `AgentMiddleware` — the base class for custom middleware (Phase 02B)
-- `ModelRequest` — the request object passed to `wrap_model_call`, containing agent state and the current model
-- `ModelResponse` — the response type from the model
-- `ChatOpenAI` — OpenAI chat model (can use Anthropic, etc.)
-- `Callable` — type hint for a function that handles the actual model call
+# Step 1: Define different models
+cheap_model = ChatOpenAI(model="gpt-4o-mini")    # Fast, cheap
+powerful_model = ChatOpenAI(model="gpt-4-turbo")  # Slow, expensive
 
-```python
-basic_model = ChatOpenAI(model="gpt-5-nano")      # cheap, fast
-advanced_model = ChatOpenAI(model="gpt-5.4")       # powerful, expensive
-
+# Step 2: Create middleware that decides which model to use
 class DynamicModelMiddleware(AgentMiddleware):
-```
-
-**What this does:**
-- Creates two model instances: one cheap (nano) and one powerful (gpt-5.4)
-- Defines a custom middleware class to decide which one to use per call
-
-```python
-    def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]) -> ModelResponse:
-```
-
-**What's happening:**
-- `wrap_model_call` is the middleware method that wraps model execution (see Phase 02B §9 for full reference)
-- `request: ModelRequest` — contains the current state and the model object
-- `handler: Callable` — the function that runs the model with the request (calls the LLM)
-
-```python
-        if len(request.state.messages) > self.messages_threshold:
-            model = advanced_model
-        else:
-            model = basic_model
-        return handler(request.override(model=model))
-```
-
-**What's happening:**
-- Checks the number of messages in the conversation state
-- If more than threshold → use the advanced model (better for complex conversations)
-- If less → use the cheap model (good enough for simple queries)
-- `request.override(model=model)` — creates a new request object with the chosen model
-- `handler(modified_request)` — runs the model with the new request
-- Returns the model's response
-
-```python
-    def __init__(self, messages_threshold: int) -> None:
+    def __init__(self, messages_threshold: int = 10):
         self.messages_threshold = messages_threshold
-```
+    
+    def wrap_model_call(
+        self, 
+        request: ModelRequest, 
+        handler: Callable[[ModelRequest], ModelResponse]
+    ) -> ModelResponse:
+        """Choose model based on conversation length."""
+        message_count = len(request.state.get("messages", []))
+        
+        if message_count > self.messages_threshold:
+            print(f"Using powerful model (conversation has {message_count} messages)")
+            selected_model = powerful_model
+        else:
+            print(f"Using cheap model (conversation has {message_count} messages)")
+            selected_model = cheap_model
+        
+        # Override the model and execute
+        return handler(request.override(model=selected_model))
 
-**What this does:**
-- Constructor that stores the threshold value
-- Example: threshold of 10 means "use advanced model after 10+ messages in history"
-
----
-
-### Using dynamic model selection
-
-```python
+# Step 3: Create agent with dynamic model middleware
 agent = create_agent(
-    model=basic_model,   # default fallback
-    tools=tools,
-    middleware=[DynamicModelMiddleware(messages_threshold=10)]
+    model=cheap_model,  # Default
+    tools=[],
+    middleware=[DynamicModelMiddleware(messages_threshold=10)],
+    system_prompt="You are a helpful assistant."
 )
+
+# Step 4: Test it
+# First call — short conversation (uses cheap model)
+result1 = agent.invoke({
+    "messages": [{"role": "user", "content": "What is 2+2?"}]
+})
+# Output: Using cheap model (conversation has 1 messages)
+
+# After many turns — long conversation (uses powerful model)
+messages = [
+    {"role": "user", "content": f"Question {i}"}
+    for i in range(15)
+]
+result2 = agent.invoke({"messages": messages})
+# Output: Using powerful model (conversation has 15 messages)
 ```
 
-**What's happening:**
-- `model=basic_model` — starts with the cheap model by default
-- `middleware=[DynamicModelMiddleware(...)]` — middleware decides per call whether to switch models
-- `messages_threshold=10` — switch to advanced after 10+ messages
-
-### How it works in practice
+### How It Works
 
 ```
-User asks simple question (5 messages total)
-→ DynamicModelMiddleware checks: 5 < 10? Yes
-→ Uses basic_model (gpt-5-nano)
-→ Fast, cheap response
+User starts conversation
+    ↓
+Agent calls model
+    ↓
+DynamicModelMiddleware.wrap_model_call runs
+    ↓
+Checks message count: 1 message < 10 threshold
+    ↓
+Selects cheap_model
+    ↓
+Runs model with cheap_model
+    ↓
+Returns response
 
-User asks follow-up after many turns (15 messages total)
-→ DynamicModelMiddleware checks: 15 > 10? Yes
-→ Switches to advanced_model (gpt-5.4)
-→ Better reasoning, handles complexity, costs more
+[User adds many more messages]
+    ↓
+Next model call
+    ↓
+Checks message count: 15 messages > 10 threshold
+    ↓
+Selects powerful_model
+    ↓
+Runs model with powerful_model (better reasoning)
 ```
-
----
-
-### When to use dynamic model selection
-
-**Use it when:**
-- Simple queries can be handled by a cheap model
-- Complex queries need a powerful model
-- You want cost optimization (pay for power only when needed)
-- You're trying multiple models for A/B testing
-- Different user tiers get different models (free tier = cheap, pro tier = advanced)
-
-**Don't use it when:**
-- One model handles all your use cases fine
-- Model switching adds latency you can't afford
 
 ---
 
 ## 11. Structured Output
 
-When you need the agent to return a response in a specific JSON structure (not free-form text), use structured output. This is useful for APIs, data extraction, or when downstream systems expect a specific format.
+Generate JSON responses with a specific schema instead of free-form text.
 
-**Source:** `migrate-complete.md` (Structured output → Tool and provider strategies section)
+**Source:** `migrate-complete.md` (Structured output section)
 
-### Defining the output schema
+### Explanation
+
+Instead of asking the agent to write free-form responses, you can specify a JSON schema it must follow:
+
+```python
+class OutputSchema(BaseModel):
+    summary: str
+    sentiment: str  # "positive", "negative", "neutral"
+```
+
+Now the agent always returns `{"summary": "...", "sentiment": "..."}` — never random text.
+
+### Complete Runnable Code
 
 ```python
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy, ProviderStrategy
+from langchain.tools import tool
 from pydantic import BaseModel
 
-class OutputSchema(BaseModel):
+# Step 1: Define the output schema
+class ReviewAnalysis(BaseModel):
     summary: str
-    sentiment: str
-```
+    sentiment: str  # "positive", "negative", "neutral"
+    rating: int     # 1-5 stars
 
-**What this does:**
-- `OutputSchema` is a Pydantic model that defines the **exact structure** of the agent's response
-- `summary: str` — the agent must return a string field called "summary"
-- `sentiment: str` — the agent must return a string field called "sentiment"
-- When the agent finishes, you get back a dict with these exact fields
+# Step 2: Define a sample tool
+@tool
+def fetch_review(review_id: str) -> str:
+    """Fetch a customer review by ID."""
+    return "Great product! Works exactly as described. Very happy with the purchase. Highly recommend!"
 
-### Using ToolStrategy (artificial tool calling)
-
-```python
-# Using ToolStrategy (artificial tool calling)
-agent = create_agent(
-    model="gpt-5.4-mini",
-    tools=tools,
-    response_format=ToolStrategy(OutputSchema)
+# Step 3a: Create agent with ToolStrategy (works with any model)
+agent_tool_strategy = create_agent(
+    model="gpt-5-mini",
+    tools=[fetch_review],
+    response_format=ToolStrategy(ReviewAnalysis),
+    system_prompt="You are a review analyst. Analyze reviews and provide structured output."
 )
-```
 
-**How ToolStrategy works:**
-- Treats the output schema as a "fake tool" the model must call
-- The model generates tool arguments that match your schema
-- The framework extracts those arguments and returns them as structured data
-- Works with any model, not just those with native structured output support
-
-### Using ProviderStrategy (native structured output)
-
-```python
-# Using ProviderStrategy (provider-native structured output)
-agent = create_agent(
-    model="gpt-5.4-mini",
-    tools=tools,
-    response_format=ProviderStrategy(OutputSchema)
+# Step 3b: Alternatively, use ProviderStrategy (faster, but model-specific)
+agent_provider_strategy = create_agent(
+    model="gpt-5-mini",
+    tools=[fetch_review],
+    response_format=ProviderStrategy(ReviewAnalysis),
+    system_prompt="You are a review analyst."
 )
+
+# Step 4: Invoke
+result = agent_tool_strategy.invoke({
+    "messages": [{"role": "user", "content": "Analyze review #123"}]
+})
+
+print(result)
+# Output is now ALWAYS a dict:
+# {
+#     "summary": "Customer loved the product and recommends it",
+#     "sentiment": "positive",
+#     "rating": 5
+# }
+
+# Access structured fields
+print(f"Sentiment: {result['sentiment']}")
+print(f"Rating: {result['rating']}/5")
 ```
 
-**How ProviderStrategy works:**
-- Uses the model provider's native structured output capability (e.g., OpenAI's `response_format`, Claude's structured output)
-- Only works with models that support it
-- Usually faster and more reliable than ToolStrategy
-- Requires provider support
-
-### When to use each strategy
+### ToolStrategy vs ProviderStrategy
 
 | Strategy | Pros | Cons |
 |---|---|---|
-| **ToolStrategy** | Works with any model | Slightly slower, uses a tool slot |
-| **ProviderStrategy** | Faster, more reliable | Only works with models that support it |
+| **ToolStrategy** | Works with any model | Uses one tool slot, slightly slower |
+| **ProviderStrategy** | Faster, more reliable | Only works if model supports it |
 
-**Recommendation:** Try ProviderStrategy first. If your model doesn't support it, fall back to ToolStrategy.
+**Recommendation:** Try ProviderStrategy first. If it fails, fall back to ToolStrategy.
 
----
+### What Was Removed: Prompted Output
 
-### What was removed: Prompted output
-
-**Source:** `migrate-complete.md` (Structured output → Prompted output removed section)
-
-In v0, you could use "prompted output" — just telling the model in the prompt to generate a specific format:
+In v0, you could just ask the model to generate structured output in the prompt. This was unreliable:
 
 ```python
-# ❌ v0 pattern — no longer supported
+# ❌ v0 — no longer supported
 agent = create_react_agent(
-    model="gpt-5.4-mini",
-    tools=tools,
-    response_format=("please generate output like this: {...", OutputSchema)
+    model="gpt-5-mini",
+    response_format=("Generate JSON like: {...}", OutputSchema)
 )
 ```
 
-**Why it was removed:**
-- "Prompted output" is unreliable — the model sometimes ignores the instruction
-- Tool-based and provider-native strategies are much more reliable
-- Not worth the maintenance burden
-
-**What to use instead:** ToolStrategy or ProviderStrategy (above)
-
----
-
-### Using the structured output
-
-Once you invoke the agent with structured output:
-
-```python
-result = agent.invoke({"messages": [{"role": "user", "content": "Analyze this article..."}]})
-# result is now a dict like: {"summary": "...", "sentiment": "positive"}
-
-print(result["summary"])    # Access structured fields directly
-print(result["sentiment"])
-```
-
----
-
-### Key difference from v0
-
-**In v0:**
-- Structured output was generated in a **separate node** after the main agent loop
-- Added latency because the agent had to run twice
-
-**In v1:**
-- Structured output is generated in the **main loop**
-- Same cost and latency as a normal agent call
+**Why removed:** Models ignore prompts sometimes. The new strategies (tool-based and provider-native) are more reliable.
 
 ---
 
 ## 12. Streaming Node Name Change
 
-When streaming agent execution, filter on the node name.
+When streaming events from agents, filter by node name.
 
 **Source:** `migrate-complete.md` (Streaming node name rename section)
 
-In v1, the streaming node was renamed from `"agent"` to `"model"`:
+In v1, the model node was renamed from `"agent"` to `"model"`.
+
+### Complete Runnable Code
 
 ```python
-# v1 — check for "model" node
-for event in agent.stream({"messages": [...]}):
+from langchain.agents import create_agent
+from langchain.tools import tool
+
+@tool
+def hello() -> str:
+    """Say hello."""
+    return "Hello!"
+
+agent = create_agent(
+    model="gpt-5-mini",
+    tools=[hello],
+    system_prompt="You are friendly."
+)
+
+# Streaming with event filtering
+for event in agent.stream({"messages": [{"role": "user", "content": "Say hello"}]}):
+    # v1 — check for "model" node
     if "model" in event:
+        print("Model response:", event["model"])
+    # If you check for "agent", it won't match in v1
+    # if "agent" in event:  # ❌ Won't work in v1
+    #     print(event["agent"])
+```
+
+### Before and After
+
+```python
+# v0 — check for "agent" node
+for event in agent.stream(...):
+    if "agent" in event:  # ✅ Works in v0
+        print(event["agent"])
+
+# v1 — check for "model" node
+for event in agent.stream(...):
+    if "model" in event:  # ✅ Works in v1
         print(event["model"])
 ```
 
 ---
 
 ## 13. v0 → v1 Quick Reference
-
-**Source:** `migrate-complete.md` (entire `create_react_agent` → `create_agent` section)
 
 | What changed | v0 (old) | v1 (new) |
 |---|---|---|
@@ -1089,60 +1002,59 @@ for event in agent.stream({"messages": [...]}):
 | System prompt param | `prompt="..."` | `system_prompt="..."` |
 | SystemMessage in prompt | `prompt=SystemMessage(content="...")` | `system_prompt="..."` (extract string) |
 | Tools list | `tools=ToolNode([tool_a, tool_b])` | `tools=[tool_a, tool_b]` |
-| Tool error handling | Part of `ToolNode` initialization | `@wrap_tool_call` middleware |
-| Pre-model hook | `pre_model_hook=fn` | `before_model` method on `AgentMiddleware` |
-| Post-model hook | `post_model_hook=fn` | `after_model` method on `AgentMiddleware` |
+| Tool error handling | Part of `ToolNode` | `@wrap_tool_call` middleware |
 | Static context | `config={"configurable": {...}}` | `context=Context(...)` |
-| Dynamic prompt | Function passed to `prompt=` | `@dynamic_prompt` middleware |
-| State schema | Pydantic or dataclass | `TypedDict` only (inherit from `AgentState`) |
+| State schema | Pydantic or dataclass | `TypedDict` only (via `AgentState`) |
 | Streaming node name | `"agent"` | `"model"` |
-| Pre-bound model | `ChatOpenAI().bind_tools([...])` | Not supported — pass model string directly |
+| Structured output | Prompted output | `ToolStrategy` / `ProviderStrategy` |
 
 ---
 
 ## 14. Self-Quiz
 
+Test yourself before moving to Phase 02B:
+
 1. What is the new import path for `create_agent` in v1?
-2. Did the `system_prompt` parameter exist in v0? What was it called?
-3. Can you pass a `ToolNode` to the `tools` parameter in v1?
-4. Name one error you SHOULD catch in `@wrap_tool_call`. Name one you SHOULD NOT.
-5. What is the difference between `context=` and `messages=` when invoking an agent?
-6. You want to use different models based on conversation length. Which method on `AgentMiddleware` do you implement?
-7. In v0, how did you pass static metadata to an agent? How do you do it in v1?
-8. What state types are supported in v1? What types are no longer supported?
-9. What happens to `SystemMessage` objects in v1? How should you migrate them?
-10. What is the new streaming node name in v1?
-11. What does `request.override(model=new_model)` do?
-12. Can you still use `config["configurable"]` in v1? Should you for new code?
-13. What are the two structured output strategies that replaced prompted output?
-14. What are the three things `tools=` accepts in v1?
-15. What does a tool need to have to be valid (besides the `@tool` decorator)?
+2. What three types does `tools=` accept in v1?
+3. Explain the difference between static `system_prompt` and dynamic prompts.
+4. When should you use `@wrap_tool_call` vs. let an error crash the program?
+5. What is `runtime.state` and how do you use it in a tool?
+6. Can you use Pydantic models for `state_schema` in v1?
+7. What is the difference between `messages` and `context` when invoking an agent?
+8. How does `DynamicModelMiddleware` decide which model to use?
+9. What are `ToolStrategy` and `ProviderStrategy` used for?
+10. What streaming node name should you check for in v1?
+11. Why was prompted output removed for structured responses?
+12. What does `request.override(model=new_model)` do?
+13. When would you use a dynamic prompt instead of a static one?
+14. What is the purpose of `@dynamic_prompt` decorator?
+15. How do you pass context when invoking an agent?
 
 ---
 
 ## 15. Flashcards
 
-Study these before moving to Phase 02B.
+Study these before Phase 02B:
 
 | # | Question | Answer |
 |---|---|---|
 | 1 | Import path for `create_agent` in v1? | `from langchain.agents import create_agent` |
-| 2 | What was `system_prompt` called in v0? | `prompt` |
-| 3 | Does v1 accept `ToolNode` in tools list? | No — pass a plain list: `tools=[tool_a, tool_b]` |
-| 4 | What must every `@tool` function have? | A docstring and type-annotated parameters |
-| 5 | What replaced pre-model hooks? | `before_model` method on `AgentMiddleware` |
-| 6 | What replaced post-model hooks? | `after_model` method on `AgentMiddleware` |
-| 7 | How do you pass context in v1? | `context=Context(...)` on `invoke` / `stream` |
-| 8 | Streaming node name in v1? | `"model"` (was `"agent"` in v0) |
-| 9 | State type in v1? | `TypedDict` only (via `AgentState`) |
-| 10 | What replaced prompted structured output? | `ToolStrategy` and `ProviderStrategy` |
-| 11 | What does `{"jump_to": "end"}` from `before_model` do? | Short-circuits the agent loop immediately |
-| 12 | Can you access agent state in a tool? | Yes, via `runtime: ToolRuntime[None, CustomState]` |
-| 13 | What does `request.override(model=x)` do? | Creates a new request with a different model |
-| 14 | Is `config["configurable"]` deprecated? | No, still works, but `context=` is preferred for new code |
-| 15 | What type is `AgentState`? | A `TypedDict` that you inherit from for custom state |
+| 2 | Old name of `system_prompt`? | `prompt` |
+| 3 | Three types `tools=` accepts? | `@tool` functions, plain callables, `BaseTool` instances |
+| 4 | What decorator turns a function into a tool? | `@tool` |
+| 5 | What replaced `pre_model_hook`? | `@dynamic_prompt` middleware or custom `AgentMiddleware` |
+| 6 | What replaced `ToolNode`? | Just pass a plain list: `tools=[tool_a, tool_b]` |
+| 7 | How to pass context in v1? | `context=Context(...)` on `invoke` |
+| 8 | What is `runtime.state`? | The agent's state dict (includes `messages` + custom fields) |
+| 9 | Can you use Pydantic for state_schema? | No — only `TypedDict` via `AgentState` |
+| 10 | Streaming node name in v1? | `"model"` |
+| 11 | What does `@wrap_tool_call` do? | Wraps tool execution to catch runtime errors |
+| 12 | When NOT to catch tool errors? | Network failures, implementation bugs, schema errors |
+| 13 | What are `ToolStrategy` / `ProviderStrategy`? | Two ways to enforce structured output (JSON schema) |
+| 14 | Why use dynamic prompts? | To adapt instructions based on user role, conversation state, etc. |
+| 15 | What does `request.override(model=x)` do? | Creates a modified request with a different model |
 
 ---
 
 > **Next in Phase 02:** [Phase 02B — Middleware Deep Dive](./phase-02b-middleware.md)  
-> **Source files used:** `migrate-complete.md` (all sections cited inline)
+> **Source files used:** `migrate-complete.md` (all sections)

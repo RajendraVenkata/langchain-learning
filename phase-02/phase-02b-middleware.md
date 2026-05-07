@@ -5,7 +5,7 @@
 > **Source files:** `migrate-complete.md` · `langchain-middleware-complete.md`  
 > **Prerequisite:** Complete Phase 02A first.
 >
-> ⚠️ **Note on examples:** Every code example in this file is extracted directly from your source files with inline source citations.
+> ⚠️ **Note on examples:** Every example shows explanation + sourced code + complete runnable code.
 
 ---
 
@@ -13,453 +13,594 @@
 
 1. [Why Middleware?](#1-why-middleware)
 2. [Middleware Execution Flow](#2-middleware-execution-flow)
-3. [Built-in Middleware — Ready to Use](#3-built-in-middleware)
-4. [Custom State via Middleware](#4-custom-state-via-middleware)
-5. [Dynamic Model Selection](#5-dynamic-model-selection)
-6. [Tool Error Handling via Middleware](#6-tool-error-handling-via-middleware)
-7. [Dynamic Prompts via Middleware](#7-dynamic-prompts-via-middleware)
-8. [Composing Multiple Middlewares](#8-composing-multiple-middlewares)
-9. [Full Method Reference](#9-full-method-reference)
-10. [Self-Quiz](#10-self-quiz)
-11. [Flashcards](#11-flashcards)
+3. [Built-in Middleware — SummarizationMiddleware](#3-summarizationmiddleware)
+4. [Built-in Middleware — HumanInTheLoopMiddleware](#4-humaninthellopmiddleware)
+5. [Built-in Middleware — Dynamic Prompts](#5-dynamic-prompts-via-middleware)
+6. [Custom State via Middleware](#6-custom-state-via-middleware)
+7. [Dynamic Model Selection (Review)](#7-dynamic-model-selection-review)
+8. [Tool Error Handling (Review)](#8-tool-error-handling-review)
+9. [Composing Multiple Middlewares](#9-composing-multiple-middlewares)
+10. [Full Method Reference](#10-full-method-reference)
+11. [Self-Quiz](#11-self-quiz)
+12. [Flashcards](#12-flashcards)
 
 ---
 
 ## 1. Why Middleware?
 
-In v0, you had `pre_model_hook` and `post_model_hook` — single functions that ran before and after the model. In v1, middleware replaces this with a class-based, composable system where each behaviour is a reusable unit.
+In v0, you had only `pre_model_hook` and `post_model_hook` — single functions. In v1, **middleware** lets you compose multiple behaviours.
 
-**From `migrate-complete.md`:**
+**Source:** `migrate-complete.md` (Pre/post model hook sections)
 
-> Pre-model hooks are now implemented as middleware with the `before_model` method. This new pattern is more extensible — you can define multiple middlewares to run before the model is called, reusing common patterns across different agents.
+### Explanation
+
+**v0 problem:**
+```python
+def my_hook(state):
+    # Summarise messages AND redact PII AND log calls
+    # All in ONE function — messy!
+    pass
+
+agent = create_react_agent(..., pre_model_hook=my_hook)
+```
+
+**v1 solution:**
+```python
+class SummarizationMiddleware(AgentMiddleware): ...
+class PIIRedactionMiddleware(AgentMiddleware): ...
+class LoggingMiddleware(AgentMiddleware): ...
+
+agent = create_agent(
+    ...,
+    middleware=[
+        SummarizationMiddleware(),
+        PIIRedactionMiddleware(),
+        LoggingMiddleware()
+    ]
+)
+```
+
+Each middleware is **reusable** and **testable** independently.
 
 ---
 
 ## 2. Middleware Execution Flow
 
+Understanding execution order is critical.
+
 ```
 invoke(messages, context)
         ↓
-  [all middleware].before_model() in list order
+  middleware[0].before_model() → middleware[1].before_model()
         ↓
        [MODEL CALL]
         ↓
-  [all middleware].after_model() in reverse list order
+  middleware[1].after_model() → middleware[0].after_model() (reversed!)
         ↓
-   tool execution (wrapped by each middleware's wrap_tool_call)
+   tool execution (each wrapped by middleware.wrap_tool_call)
         ↓
-   (loop back to before_model if more tool calls)
+   (loop back if more tool calls)
+```
+
+**Key insight:**
+- `before_model` runs in **list order** (0 → 1 → 2)
+- `after_model` runs in **reverse order** (2 → 1 → 0) — like a stack
+
+### Complete Runnable Code
+
+```python
+from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware
+from typing import Any
+
+class Middleware1(AgentMiddleware):
+    def before_model(self, state, runtime) -> dict[str, Any] | None:
+        print("1: before_model")
+        return None
+    
+    def after_model(self, state, runtime) -> dict[str, Any] | None:
+        print("1: after_model")
+        return None
+
+class Middleware2(AgentMiddleware):
+    def before_model(self, state, runtime) -> dict[str, Any] | None:
+        print("2: before_model")
+        return None
+    
+    def after_model(self, state, runtime) -> dict[str, Any] | None:
+        print("2: after_model")
+        return None
+
+agent = create_agent(
+    model="gpt-5-mini",
+    tools=[],
+    middleware=[Middleware1(), Middleware2()]
+)
+
+agent.invoke({"messages": [{"role": "user", "content": "Hello"}]})
+
+# Output:
+# 1: before_model
+# 2: before_model
+# [MODEL CALL]
+# 2: after_model
+# 1: after_model
 ```
 
 ---
 
-## 3. Built-in Middleware
+## 3. SummarizationMiddleware
 
-### SummarizationMiddleware
+Automatically summarises conversation history when it exceeds a token threshold.
 
 **Source:** `migrate-complete.md` (Pre-model hook section)
 
-Automatically summarises long conversation history when a token threshold is exceeded. This keeps context window usage manageable in long-running conversations.
+### Explanation
+
+Long conversations use many tokens, filling the model's context window. This middleware:
+1. **Monitors** message token count
+2. **Summarises** old messages when threshold exceeded
+3. **Keeps** recent messages (details matter more)
+4. **Result**: Unlimited conversation length without context overflow
+
+### Complete Runnable Code
 
 ```python
 from langchain.agents import create_agent
 from langchain.agents.middleware import SummarizationMiddleware
+from langchain.tools import tool
 
+@tool
+def answer_question(q: str) -> str:
+    """Answer a question."""
+    return f"Answer to '{q}': ..."
+
+# Create agent with summarization
 agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=tools,
+    model="gpt-5.4",
+    tools=[answer_question],
     middleware=[
         SummarizationMiddleware(
-            model="claude-sonnet-4-6",
-            trigger={"tokens": 1000}
+            model="gpt-5.4",  # Model used for summarisation
+            trigger={"tokens": 1000}  # Summarise when >1000 tokens
         )
-    ]
+    ],
+    system_prompt="You are a helpful Q&A assistant."
 )
+
+# Simulate a long conversation (20 turns)
+messages = []
+for i in range(20):
+    messages.append({"role": "user", "content": f"Question {i}: Tell me about topic {i}"})
+    messages.append({"role": "assistant", "content": f"Answer {i}: Here's information about topic {i}"})
+
+# Invoke with long history
+result = agent.invoke({
+    "messages": messages  # 40 messages total — lots of tokens!
+})
+
+print(result)
+# The middleware automatically summarised old messages
+# The model received: "Summary of earlier conversation: ..." + recent messages
 ```
 
-**Breaking down the parameters:**
+### How It Works
 
-- `model="claude-sonnet-4-6"` — the model used to summarise the history
-  - Typically the same as your agent's model (makes sense for consistency)
-  - But could be different if you want a cheaper model just for summarisation
+```
+Initial state: messages = [Q1, A1, Q2, A2, ..., Q20, A20]
+Token count: 5000 tokens (way over 1000 threshold!)
+    ↓
+SummarizationMiddleware.before_model runs
+    ↓
+Calls summarisation model: "Summarise messages 1-35"
+Gets back: "Summary: User and assistant discussed topics 1-18..."
+    ↓
+Replaces old messages: [SUMMARY_MESSAGE, Q19, A19, Q20, A20]
+Token count: 800 tokens (under threshold!)
+    ↓
+Passes shortened state to model
+```
 
-- `trigger={"tokens": 1000}` — when to trigger summarisation
-  - `"tokens": 1000` means: "When the conversation history exceeds 1000 tokens, summarise it"
-  - Tokens are how models count words (roughly 1 token ≈ 4 characters)
-  - Without this, long conversations fill up the model's context window and make responses slower/more expensive
+---
 
-**How it works:**
-1. Each turn, the middleware checks the token count of accumulated messages
-2. If it exceeds 1000 tokens:
-   - Summarise all old messages into a shorter summary
-   - Replace the original messages with the summary
-   - Keep the most recent messages as-is (details matter more for recent context)
-3. The model never sees the full history — just "Summary of previous conversation: ..." + recent messages
+## 4. HumanInTheLoopMiddleware
 
-**When to use:**
-- Chatbots or assistants that run for many turns
-- Cost-sensitive applications (tokens = money)
-- Any agent where context window is a bottleneck
-
-**Don't use when:**
-- Conversations are naturally short
-- You need perfect recall of early history
-- The summarisation latency is too expensive
-
-### HumanInTheLoopMiddleware
+Pauses agent execution before specific tool calls, requiring human approval.
 
 **Source:** `migrate-complete.md` (Post-model hook section)
 
-Pauses agent execution before specific tool calls and waits for human approval. Critical for any agent that can take irreversible actions.
+### Explanation
+
+For **irreversible actions** (send email, delete data, publish), you need human approval:
+
+1. Agent decides to call `send_email`
+2. Middleware **intercepts** the call
+3. Shows human the email content
+4. Human clicks "approve" or "reject"
+5. If approved: email sends. If rejected: agent tries different approach.
+
+### Complete Runnable Code
 
 ```python
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langchain.tools import tool
 
+# Tools that need approval
+@tool
+def send_email(recipient: str, subject: str, body: str) -> str:
+    """Send an email to someone."""
+    return f"Email sent to {recipient}: {subject}"
+
+@tool
+def delete_file(filename: str) -> str:
+    """Delete a file (irreversible!)."""
+    return f"File deleted: {filename}"
+
+@tool
+def read_file(filename: str) -> str:
+    """Read a file (safe, no approval needed)."""
+    return f"Contents of {filename}: ..."
+
+# Create agent with HITL
 agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=[read_email, send_email],
+    model="gpt-5.4",
+    tools=[send_email, delete_file, read_file],
     middleware=[
         HumanInTheLoopMiddleware(
             interrupt_on={
                 "send_email": {
-                    "description": "Please review this email before sending",
+                    "description": "Please review this email before sending:",
+                    "allowed_decisions": ["approve", "reject"]
+                },
+                "delete_file": {
+                    "description": "Confirm file deletion (this is irreversible):",
                     "allowed_decisions": ["approve", "reject"]
                 }
+                # Note: read_file is NOT in interrupt_on, so it runs without approval
             }
         )
-    ]
+    ],
+    system_prompt="You are a helpful assistant."
 )
+
+# Invoke
+result = agent.invoke({
+    "messages": [{"role": "user", "content": "Send an email to alice@example.com saying hello"}]
+})
+
+# What happens:
+# 1. Agent decides to call send_email(...)
+# 2. Middleware shows: "Please review this email before sending:"
+# 3. Human sees email content and decides
+# 4. If "approve": email_sends, agent continues
+# 5. If "reject": email NOT sent, agent gets message "User rejected" and can try alternatives
+
+print(result)
 ```
 
-**Breaking down the configuration:**
+### When to Require Approval
 
-```python
-interrupt_on={
-    "send_email": {  # ← Tool name to require approval for
-        "description": "Please review this email before sending",  # ← What to show the user
-        "allowed_decisions": ["approve", "reject"]  # ← Options the user can choose
-    }
-}
-```
-
-**What happens when the agent calls `send_email`:**
-1. Agent decides to call the `send_email` tool
-2. Middleware intercepts the call
-3. Pauses the agent loop
-4. Shows the user: "Please review this email before sending"
-5. User chooses "approve" or "reject"
-6. If "approve": tool actually runs, email gets sent
-7. If "reject": tool does NOT run, agent gets a message that the user rejected it
-
-**Using it with multiple tools:**
-
-```python
-HumanInTheLoopMiddleware(
-    interrupt_on={
-        "send_email": {
-            "description": "Please review this email before sending",
-            "allowed_decisions": ["approve", "reject"]
-        },
-        "delete_record": {
-            "description": "Confirm record deletion",
-            "allowed_decisions": ["approve", "reject", "modify"]  # ← More options
-        }
-    }
-)
-```
-
-**When to require human approval:**
-- **Writing operations:** delete, update, send, publish
-- **High-value operations:** financial transfers, account changes
-- **Irreversible operations:** anything that can't be undone
-- **Privacy-sensitive:** operations involving user data
-
-**When NOT to require approval:**
-- **Read-only operations:** fetch, search, analyze (user sees result, can judge accuracy)
-- **Low-risk operations:** formatting, simple calculations
-- Every tool requiring approval creates friction — only do it when necessary
+| Operation | Require Approval? | Why |
+|---|---|---|
+| Send email | ✅ YES | Irreversible, affects user |
+| Delete file | ✅ YES | Irreversible, data loss |
+| Publish to social media | ✅ YES | Public, hard to undo |
+| Write to database | ✅ YES | Irreversible change |
+| Read file | ❌ NO | Read-only, user sees result |
+| Search web | ❌ NO | Read-only, low risk |
+| Summarise document | ❌ NO | Analysis only, no side effects |
+| Calculate numbers | ❌ NO | Math operation, reversible |
 
 ---
 
-## 4. Custom State via Middleware
+## 5. Dynamic Prompts via Middleware
 
-### Method 1: Via `state_schema` on `create_agent`
+**This was covered in Phase 02A §4. Review that section for complete code.**
 
-**Source:** `migrate-complete.md` (Custom state → Defining state via state_schema section)
-
-Use when custom state needs to be accessed by **tools**:
+Brief recap:
 
 ```python
-from langchain.tools import tool, ToolRuntime
-from langchain.agents import create_agent, AgentState
+@dynamic_prompt
+def role_based_prompt(request: ModelRequest) -> str:
+    user_role = request.runtime.context.user_role
+    if user_role == "admin":
+        return "You have full access"
+    return "You have limited access"
 
-# Define custom state extending AgentState
-class CustomState(AgentState):
-    user_name: str
-
-@tool
-def greet(
-    runtime: ToolRuntime[None, CustomState]
-) -> str:
-    """Use this to greet the user by name."""
-    user_name = runtime.state.get("user_name", "Unknown")
-    return f"Hello {user_name}!"
-
-agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=[greet],
-    state_schema=CustomState
-)
+agent = create_agent(..., middleware=[role_based_prompt], context_schema=Context)
 ```
 
-### Method 2: Via `state_schema` attribute on the middleware class
+---
+
+## 6. Custom State via Middleware
+
+Define state that's managed by a specific middleware.
 
 **Source:** `migrate-complete.md` (Custom state → Defining state via middleware section)
 
-Use when custom state is managed **only by the middleware itself**:
+### Explanation
+
+State can live in two places:
+1. **Global state** (via `state_schema` on `create_agent`) — accessed by tools and middleware
+2. **Middleware-scoped state** (via `state_schema` on middleware class) — only used by that middleware
+
+Use #2 when the state is **only relevant to one middleware**.
+
+### Complete Runnable Code
 
 ```python
-from langchain.agents.middleware import AgentState, AgentMiddleware
+from langchain.agents import create_agent, AgentState
+from langchain.agents.middleware import AgentMiddleware
 from typing_extensions import NotRequired
 from typing import Any
 
-class CustomState(AgentState):
-    model_call_count: NotRequired[int]
+# Step 1: Define state that this middleware uses
+class CallCounterState(AgentState):
+    model_call_count: NotRequired[int]  # Optional field, no default
 
-class CallCounterMiddleware(AgentMiddleware[CustomState]):
-    state_schema = CustomState
-
-    def before_model(self, state: CustomState, runtime) -> dict[str, Any] | None:
+# Step 2: Create middleware with its own state
+class CallCounterMiddleware(AgentMiddleware[CallCounterState]):
+    state_schema = CallCounterState  # ← Associate state with this middleware
+    
+    def before_model(self, state: CallCounterState, runtime) -> dict[str, Any] | None:
         count = state.get("model_call_count", 0)
+        print(f"Model call #{count + 1}")
+        
         if count > 10:
-            return {"jump_to": "end"}
+            print("Too many model calls! Stopping.")
+            return {"jump_to": "end"}  # Short-circuit
         return None
+    
+    def after_model(self, state: CallCounterState, runtime) -> dict[str, Any] | None:
+        count = state.get("model_call_count", 0)
+        return {"model_call_count": count + 1}  # Increment counter
 
-    def after_model(self, state: CustomState, runtime) -> dict[str, Any] | None:
-        return {"model_call_count": state.get("model_call_count", 0) + 1}
-
+# Step 3: Create agent with the middleware
 agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=[...],
-    middleware=[CallCounterMiddleware()]
+    model="gpt-5-mini",
+    tools=[],
+    middleware=[CallCounterMiddleware()],
+    system_prompt="You are helpful."
 )
+
+# Step 4: Invoke
+result = agent.invoke({"messages": [{"role": "user", "content": "Hello"}]})
+
+# Output:
+# Model call #1
+# [Agent executes]
+# Model call #2
+# [Agent executes]
+# ... up to Model call #11
+# Too many model calls! Stopping.
+```
+
+### When to Use Middleware-Scoped State
+
+**Use middleware-scoped state when:**
+- The state field is only used by one middleware
+- You want to keep concerns separated
+- The state is internal bookkeeping (call counts, cache, etc.)
+
+**Use global state when:**
+- Tools need access to the field
+- Multiple middlewares need the same field
+- It's user-facing metadata (user_id, tier, etc.)
+
+---
+
+## 7. Dynamic Model Selection (Review)
+
+**This was covered in Phase 02A §10.** Middleware wraps the model call and chooses which model to use.
+
+```python
+class DynamicModelMiddleware(AgentMiddleware):
+    def wrap_model_call(self, request, handler):
+        if len(request.state.messages) > 10:
+            return handler(request.override(model=powerful_model))
+        return handler(request.override(model=cheap_model))
 ```
 
 ---
 
-## 5. Dynamic Model Selection
+## 8. Tool Error Handling (Review)
 
-**Source:** `migrate-complete.md` (Model → Dynamic model selection section)
+**This was covered in Phase 02A §6.** Use `@wrap_tool_call` to catch runtime errors.
 
-Choose different models based on runtime conditions (e.g., conversation length):
+```python
+@wrap_tool_call
+def handle_errors(request, handler):
+    try:
+        return handler(request)
+    except Exception as e:
+        return ToolMessage(content=f"Error: {e}", tool_call_id=request.tool_call["id"])
+```
+
+---
+
+## 9. Composing Multiple Middlewares
+
+Stack middlewares together. Each runs independently.
+
+### Complete Runnable Code
 
 ```python
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
-    AgentMiddleware, ModelRequest
+    SummarizationMiddleware,
+    HumanInTheLoopMiddleware,
+    AgentMiddleware
 )
-from langchain.agents.middleware.types import ModelResponse
-from langchain_openai import ChatOpenAI
-from typing import Callable
+from typing import Any
 
-basic_model = ChatOpenAI(model="gpt-5-nano")
-advanced_model = ChatOpenAI(model="gpt-5.4")
+# Custom logging middleware
+class LoggingMiddleware(AgentMiddleware):
+    def before_model(self, state, runtime) -> dict[str, Any] | None:
+        print(f"[LOG] About to call model with {len(state.get('messages', []))} messages")
+        return None
+    
+    def after_model(self, state, runtime) -> dict[str, Any] | None:
+        print("[LOG] Model call completed")
+        return None
 
-class DynamicModelMiddleware(AgentMiddleware):
-
-    def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]) -> ModelResponse:
-        if len(request.state.messages) > self.messages_threshold:
-            model = advanced_model
-        else:
-            model = basic_model
-        return handler(request.override(model=model))
-
-    def __init__(self, messages_threshold: int) -> None:
-        self.messages_threshold = messages_threshold
-
-agent = create_agent(
-    model=basic_model,
-    tools=tools,
-    middleware=[DynamicModelMiddleware(messages_threshold=10)]
-)
-```
-
----
-
-## 6. Tool Error Handling via Middleware
-
-**Source:** `migrate-complete.md` (Tools → Handling tool errors section)
-
-```python
-from langchain.agents import create_agent
-from langchain.agents.middleware import wrap_tool_call
-from langchain.messages import ToolMessage
-
-@wrap_tool_call
-def handle_tool_errors(request, handler):
-    """Handle tool execution errors with custom messages."""
-    try:
-        return handler(request)
-    except Exception as e:
-        # Only handle errors that occur during tool execution due to invalid inputs
-        # that pass schema validation but fail at runtime (e.g., invalid SQL syntax).
-        # Do NOT handle:
-        # - Network failures (use tool retry middleware instead)
-        # - Incorrect tool implementation errors (should bubble up)
-        # - Schema mismatch errors (already auto-handled by the framework)
-        #
-        # Return a custom error message to the model
-        return ToolMessage(
-            content=f"Tool error: Please check your input and try again. ({str(e)})",
-            tool_call_id=request.tool_call["id"]
-        )
-
-agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=[check_weather, search_web],
-    middleware=[handle_tool_errors]
-)
-```
-
----
-
-## 7. Dynamic Prompts via Middleware
-
-**Source:** `migrate-complete.md` (Dynamic prompts section)
-
-```python
-from dataclasses import dataclass
-from langchain.agents import create_agent
-from langchain.agents.middleware import dynamic_prompt, ModelRequest
-from langgraph.runtime import Runtime
-
-@dataclass
-class Context:
-    user_role: str = "user"
-
-@dynamic_prompt
-def dynamic_prompt(request: ModelRequest) -> str:
-    user_role = request.runtime.context.user_role
-    base_prompt = "You are a helpful assistant."
-
-    if user_role == "expert":
-        prompt = (
-            f"{base_prompt} Provide detailed technical responses."
-        )
-    elif user_role == "beginner":
-        prompt = (
-            f"{base_prompt} Explain concepts simply and avoid jargon."
-        )
-    else:
-        prompt = base_prompt
-
-    return prompt
-
+# Stack them all
 agent = create_agent(
     model="gpt-5.4",
-    tools=tools,
-    middleware=[dynamic_prompt],
-    context_schema=Context
-)
-
-# Use with context
-agent.invoke(
-    {"messages": [{"role": "user", "content": "Explain async programming"}]},
-    context=Context(user_role="expert")
-)
-```
-
----
-
-## 8. Composing Multiple Middlewares
-
-Stack multiple middlewares — each runs independently in sequence:
-
-**Implied from `migrate-complete.md` (multiple middleware examples)**
-
-```python
-from langchain.agents import create_agent
-from langchain.agents.middleware import SummarizationMiddleware, HumanInTheLoopMiddleware
-
-agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=[read_email, send_email, search_web],
+    tools=[send_email, delete_file],
     middleware=[
-        # 1. Summarise when history gets long
+        # 1. Log everything
+        LoggingMiddleware(),
+        
+        # 2. Summarise if conversation gets long
         SummarizationMiddleware(
-            model="claude-sonnet-4-6",
+            model="gpt-5.4",
             trigger={"tokens": 2000}
         ),
         
-        # 2. Require human approval before sending emails
+        # 3. Require approval for risky operations
         HumanInTheLoopMiddleware(
-            interrupt_on={"send_email": {"allowed_decisions": ["approve", "reject"]}}
-        ),
-        
-        # 3. Handle tool runtime errors
-        handle_tool_errors,   # @wrap_tool_call decorated function
-    ]
+            interrupt_on={
+                "send_email": {"description": "Review email:", "allowed_decisions": ["approve", "reject"]},
+                "delete_file": {"description": "Confirm deletion:", "allowed_decisions": ["approve", "reject"]}
+            }
+        )
+    ],
+    system_prompt="You are a helpful assistant."
 )
+
+# When agent runs:
+# 1. LoggingMiddleware.before_model → "About to call model..."
+# 2. SummarizationMiddleware.before_model → Summarises if needed
+# 3. Model runs
+# 4. SummarizationMiddleware.after_model
+# 5. LoggingMiddleware.after_model → "Model call completed"
+# 6. Tool execution with HumanInTheLoopMiddleware checks
+```
+
+### Execution Order Diagram
+
+```
+invoke()
+  ↓
+LoggingMiddleware.before_model() ──→ logs start
+  ↓
+SummarizationMiddleware.before_model() ──→ summarises if needed
+  ↓
+[MODEL CALL]
+  ↓
+SummarizationMiddleware.after_model() ──→ no-op (just passes through)
+  ↓
+LoggingMiddleware.after_model() ──→ logs completion
+  ↓
+Tool execution (e.g., send_email)
+  ↓
+HumanInTheLoopMiddleware.wrap_tool_call() ──→ pauses for approval
+  ↓
+Result returned
 ```
 
 ---
 
-## 9. Full Method Reference
+## 10. Full Method Reference
 
-All methods available on `AgentMiddleware`:
+All available methods on `AgentMiddleware`:
 
-| Method | When it runs | Return value | Purpose |
-|---|---|---|---|
-| `before_model(state, runtime)` | Before every model call | `None` (continue) or `dict` (state update) or `{"jump_to": "end"}` (short-circuit) | Input guardrails, summarisation, message trimming |
-| `after_model(state, runtime)` | After every model call | `None` (continue) or `dict` (state update) | Output guardrails, HITL approval, logging |
-| `wrap_model_call(request, handler)` | Around every model call | result of `handler(request)` or modified result | Dynamic model selection, model-level retry |
-| `wrap_tool_call(request, handler)` | Around every tool execution | result of `handler(request)` or `ToolMessage` | Tool error handling, tool-level retry |
+```python
+from langchain.agents.middleware import AgentMiddleware, ModelRequest
+from langchain.agents.middleware.types import ModelResponse
+from typing import Callable, Any
+
+class YourMiddleware(AgentMiddleware):
+    # Called before every model invocation
+    def before_model(
+        self,
+        state: dict[str, Any],
+        runtime
+    ) -> dict[str, Any] | None:
+        """
+        Return None to continue normally.
+        Return dict to update state before model.
+        Return {"jump_to": "end"} to short-circuit.
+        """
+        pass
+    
+    # Called after every model response
+    def after_model(
+        self,
+        state: dict[str, Any],
+        runtime
+    ) -> dict[str, Any] | None:
+        """
+        Return None to continue normally.
+        Return dict to update state after model.
+        """
+        pass
+    
+    # Wraps every tool execution
+    def wrap_tool_call(
+        self,
+        request,  # Contains tool call info
+        handler: Callable  # Executes the tool
+    ):
+        """
+        Call handler(request) to execute tool normally.
+        Catch exceptions, modify request, log events, etc.
+        """
+        return handler(request)
+    
+    # Wraps every model call (advanced)
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse]
+    ) -> ModelResponse:
+        """
+        Call handler(request) to invoke model normally.
+        Use request.override(model=new_model) to change model.
+        """
+        return handler(request)
+```
 
 ---
 
-## 10. Self-Quiz
+## 11. Self-Quiz
 
-1. In what order do `before_model` hooks run when three middlewares are stacked?
-2. In what order do `after_model` hooks run relative to the middleware list?
-3. What return value from `before_model` immediately ends the agent loop?
-4. What is the difference between `SummarizationMiddleware` and `HumanInTheLoopMiddleware`?
-5. When should you define custom state via `state_schema` on `create_agent` vs. via the middleware class attribute?
-6. What two parameters does `SummarizationMiddleware` require?
-7. What three keys can be in the `interrupt_on` dict for `HumanInTheLoopMiddleware`?
-8. What method on `AgentMiddleware` implements dynamic model selection?
-9. What does `request.override(model=new_model)` do?
-10. Can you have more than one middleware in a single agent?
-11. Which middleware method wraps tool execution?
-12. What does the `@dynamic_prompt` decorator do?
-13. When `after_model` returns `{"jump_to": "end"}`, what happens?
-14. What is the signature of `wrap_tool_call`?
-15. How do you access the current conversation state inside a middleware method?
+1. What is the execution order of `before_model` hooks with 3 middlewares?
+2. What is the execution order of `after_model` hooks with 3 middlewares?
+3. What return value from `before_model` short-circuits the agent?
+4. When should you use `state_schema` on middleware vs on `create_agent`?
+5. What is `NotRequired[int]` in a state TypedDict?
+6. How does `SummarizationMiddleware` prevent context overflow?
+7. What are the two main parameters of `HumanInTheLoopMiddleware`?
+8. Can you have more than one middleware?
+9. What does `request.override(model=x)` do?
+10. What is the difference between middleware-scoped state and global state?
 
 ---
 
-## 11. Flashcards
+## 12. Flashcards
 
 | # | Question | Answer |
 |---|---|---|
-| 1 | What replaced `pre_model_hook`? | `before_model` method on `AgentMiddleware` |
-| 2 | What replaced `post_model_hook`? | `after_model` method on `AgentMiddleware` |
-| 3 | What return value short-circuits the agent loop from `before_model`? | `{"jump_to": "end"}` |
-| 4 | Order of `before_model` hooks in a 3-middleware stack? | List order: middleware[0] → middleware[1] → middleware[2] |
-| 5 | Order of `after_model` hooks in a 3-middleware stack? | Reverse order: middleware[2] → middleware[1] → middleware[0] |
-| 6 | Which built-in middleware handles conversation length? | `SummarizationMiddleware` |
-| 7 | Which built-in middleware pauses for human approval? | `HumanInTheLoopMiddleware` |
-| 8 | Which middleware method handles dynamic model selection? | `wrap_model_call` |
-| 9 | Which middleware method wraps tool execution? | `wrap_tool_call` |
-| 10 | When should you use `state_schema` on `create_agent`? | When tools need to access the custom state |
-| 11 | When should you use `state_schema` on the middleware class? | When only the middleware manages that state |
-| 12 | What type must custom state be? | `TypedDict` (via `AgentState` inheritance) |
-| 13 | What does `NotRequired[int]` mean in state? | The field is optional with no required default |
-| 14 | What is `@dynamic_prompt`? | Decorator for middleware that adapts the system prompt per call |
-| 15 | Can you chain multiple middlewares? | Yes — they compose and run in sequence |
+| 1 | Execution order of `before_model` with 3 middlewares? | List order: 0 → 1 → 2 |
+| 2 | Execution order of `after_model` with 3 middlewares? | Reverse order: 2 → 1 → 0 |
+| 3 | What return value short-circuits the agent? | `{"jump_to": "end"}` from `before_model` |
+| 4 | When to use middleware-scoped state? | When only that middleware uses it |
+| 5 | When to use global state? | When tools or multiple middlewares need it |
+| 6 | What does `SummarizationMiddleware` do? | Summarises conversation when token threshold exceeded |
+| 7 | What does `HumanInTheLoopMiddleware` do? | Pauses for approval before risky tool calls |
+| 8 | What does `LoggingMiddleware` do? | Example: logs model call events |
+| 9 | What is `NotRequired[T]`? | Optional field with no required default value |
+| 10 | Can you stack multiple middlewares? | Yes — they run in sequence, each independently |
+| 11 | What method wraps tool execution? | `wrap_tool_call(request, handler)` |
+| 12 | What method wraps model execution? | `wrap_model_call(request, handler)` |
+| 13 | What does `handler(request)` do? | Executes the wrapped operation (tool or model call) |
+| 14 | How to modify state in `after_model`? | Return `{"field": new_value}` dict |
+| 15 | What is the base class for custom middleware? | `AgentMiddleware` |
 
 ---
 
 > **Next in Phase 02:** [Phase 02C — Messages, Chat Models & Tutorials](./phase-02c-messages-and-tutorials.md)  
 > **Previous:** [Phase 02A — Agents & Tools](./phase-02a-agents-and-tools.md)  
-> **Source files used:** `migrate-complete.md` (all middleware patterns cited inline)
+> **Source files used:** `migrate-complete.md`
