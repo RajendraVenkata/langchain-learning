@@ -3,131 +3,53 @@
 > **Level:** Intermediate  
 > **Part:** 3 of 3 in Phase 02  
 > **Source files:** `migrate-complete.md` · `oss-complete.md`  
-> **Prerequisite:** Complete Phase 02A and 02B first.  
-> **Goal:** Understand the message system (types, content blocks, multimodal), how to initialise chat models and embeddings, and which tutorials to complete in this phase.
+> **Prerequisite:** Complete Phase 02A and 02B first.
+>
+> ⚠️ **Note on examples:** Every code example in this file is extracted directly from your source files with inline source citations.
 
 ---
 
 ## Table of Contents
 
-1. [The Message System](#1-the-message-system)
-2. [Standard Content Blocks (v1 Feature)](#2-standard-content-blocks)
-3. [Multimodal Messages](#3-multimodal-messages)
-4. [Serializing Content Blocks](#4-serializing-content-blocks)
-5. [Chat Models — `init_chat_model`](#5-chat-models)
-6. [Embeddings — `init_embeddings`](#6-embeddings)
-7. [Breaking Changes in Messages (v1)](#7-breaking-changes)
-8. [Tutorials to Complete in Phase 02](#8-tutorials)
-9. [Phase 02 — Complete Self-Quiz (All 3 Files)](#9-complete-self-quiz)
-10. [Phase 02 — Master Flashcard Deck](#10-master-flashcards)
-11. [Phase 02 — Readiness Checklist](#11-readiness-checklist)
+1. [Message Types](#1-message-types)
+2. [Standard Content Blocks (v1 Feature)](#2-standard-content-blocks-v1-feature)
+3. [Creating Multimodal Messages](#3-creating-multimodal-messages)
+4. [Content Block Serialization](#4-content-block-serialization)
+5. [Chat Model Initialization](#5-chat-model-initialization)
+6. [Embedding Initialization](#6-embedding-initialization)
+7. [Breaking Changes in Messages and Models](#7-breaking-changes-in-messages-and-models)
+8. [Tutorials to Complete](#8-tutorials-to-complete)
+9. [Phase 02 Complete Self-Quiz](#9-phase-02-complete-self-quiz)
+10. [Phase 02 Master Flashcard Deck](#10-phase-02-master-flashcard-deck)
+11. [Phase 02 Readiness Checklist](#11-phase-02-readiness-checklist)
 
 ---
 
-## 1. The Message System
+## 1. Message Types
 
-Every agent conversation is a list of messages. LangChain defines specific message types for each role in the conversation.
+The conversation history is a list of message objects. Each message has a role and content.
 
-### Message types
+From `migrate-complete.md` (Standard content section), the main message types are:
 
-| Type | Import | When it appears | Key field |
-|---|---|---|---|
-| `HumanMessage` | `langchain.messages` | User turn | `content` |
-| `AIMessage` | `langchain.messages` | Model response turn | `content`, `tool_calls` |
-| `ToolMessage` | `langchain.messages` | Tool result turn | `content`, `tool_call_id` |
-| `SystemMessage` | `langchain.messages` | System-level instruction | `content` |
-| `AIMessageChunk` | `langchain.messages` | Streaming chunk from model | `content`, `chunk_position` |
-
-```python
-from langchain.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
-
-# Building a conversation manually
-messages = [
-    SystemMessage(content="You are a helpful assistant."),
-    HumanMessage(content="What is the capital of France?"),
-    AIMessage(content="The capital of France is Paris."),
-    HumanMessage(content="And what about Germany?"),
-]
-```
-
-### `trim_messages` — managing context window size
-
-When conversation history grows long, use `trim_messages` to keep only what fits in the model's context window.
-
-```python
-from langchain.messages import trim_messages
-
-trimmed = trim_messages(
-    messages,
-    max_tokens=1000,       # token budget
-    strategy="last",       # keep the most recent messages
-    token_counter=model,   # model used to count tokens
-)
-```
-
-### Minor message changes in v1
-
-**`AIMessage.text` is now a property (not a method):**
-```python
-# v1 — correct (property access)
-text = response.text
-
-# v0 — old (method call), still works but emits a deprecation warning
-text = response.text()
-```
-
-**`AIMessageChunk` has a new `chunk_position` attribute:**
-```python
-for chunk in agent.stream({"messages": [...]}):
-    if hasattr(chunk, "chunk_position") and chunk.chunk_position == "last":
-        print("This is the final chunk in the stream")
-```
-
-**`AIMessage.example` parameter removed:**
-```python
-# ❌ No longer supported in v1
-AIMessage(content="Hello", example=True)
-
-# ✅ Use additional_kwargs for extra metadata
-AIMessage(content="Hello", additional_kwargs={"is_example": True})
-```
-
-**Return type of chat model invocation fixed:**
-```python
-# v1 — return type is now explicitly AIMessage (not BaseMessage)
-response: AIMessage = model.invoke("Hello")
-```
+- `HumanMessage` — user turn
+- `AIMessage` — model response turn
+- `ToolMessage` — tool result turn
+- `SystemMessage` — system-level instruction
 
 ---
 
-## 2. Standard Content Blocks
+## 2. Standard Content Blocks (v1 Feature)
 
-This is a significant v1 feature. In v0, message content was **provider-specific** — OpenAI and Anthropic used different formats for the same content types (like reasoning/thinking output). In v1, messages have a `content_blocks` property that provides a **provider-agnostic, standardised view** of the content.
+In v1, all messages have a `content_blocks` property that provides a **provider-agnostic, standardised view** of message content.
 
-### The problem it solves
-
-```python
-# v0 — you had to write different code for each provider
-response = model.invoke("Explain AI")
-for item in response.content:
-    if item.get("type") == "reasoning":
-        ...  # OpenAI-style reasoning
-    elif item.get("type") == "thinking":
-        ...  # Anthropic-style thinking — different key!
-    elif item.get("type") == "text":
-        ...  # Text
-```
-
-### The v1 solution
+**Source:** `migrate-complete.md` (Standard content → Read standardized content section)
 
 ```python
-# v1 — provider-agnostic via content_blocks
 from langchain.chat_models import init_chat_model
 
 model = init_chat_model("gpt-5-nano")
 response = model.invoke("Explain AI")
 
-# Works the same regardless of provider
 for block in response.content_blocks:
     if block["type"] == "reasoning":
         print(block.get("reasoning"))
@@ -135,7 +57,30 @@ for block in response.content_blocks:
         print(block.get("text"))
 ```
 
-### Standard block shapes
+**Key distinction from v0:**
+
+- `message.content` — unchanged from v0. Returns strings or provider-native structures.
+- `message.content_blocks` — **new in v1**. Returns standardised block dicts, regardless of provider.
+
+---
+
+## 3. Creating Multimodal Messages
+
+Create messages with multiple content types (text + images).
+
+**Source:** `migrate-complete.md` (Standard content → Create multimodal messages section)
+
+```python
+from langchain.messages import HumanMessage
+
+message = HumanMessage(content_blocks=[
+    {"type": "text", "text": "Describe this image."},
+    {"type": "image", "url": "https://example.com/image.jpg"},
+])
+res = model.invoke([message])
+```
+
+**Example block shapes from `migrate-complete.md`:**
 
 ```python
 # Text block
@@ -150,89 +95,50 @@ image_block = {
     "url": "https://example.com/image.png",
     "mime_type": "image/png",
 }
-
-# Reasoning block (for models that support it)
-reasoning_block = {
-    "type": "reasoning",
-    "reasoning": "Let me think through this step by step...",
-}
 ```
-
-### Key distinction
-
-- `message.content` — unchanged from v0. Returns strings or provider-native structures. Safe for backward compatibility.
-- `message.content_blocks` — **new in v1**. Returns a list of standardised block dicts, regardless of provider.
-
-> **Rule of thumb:** Use `content_blocks` in new code when you need to process structured content (reasoning, images, text). Use `content` when you just need the raw text for display.
 
 ---
 
-## 3. Multimodal Messages
+## 4. Content Block Serialization
 
-Multimodal messages contain multiple content types in a single message (e.g., text + image). In v1, you construct these using `content_blocks` on `HumanMessage`.
+By default, `content_blocks` are **not serialized** into the `content` field. If you need them in `content`, opt in.
 
-```python
-from langchain.messages import HumanMessage
+**Source:** `migrate-complete.md` (Standard content → Serialize standard content section)
 
-# v1 — using content_blocks (provider-agnostic)
-message = HumanMessage(content_blocks=[
-    {"type": "text", "text": "What is in this image?"},
-    {"type": "image", "url": "https://example.com/photo.jpg"},
-])
-
-response = model.invoke([message])
-```
-
-```python
-# v0 — using content list (provider-specific format)
-message = HumanMessage(content=[
-    {"type": "text", "text": "What is in this image?"},
-    {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}},  # OpenAI format
-])
-```
-
-The v1 approach using `content_blocks` works across providers without changing the code.
-
----
-
-## 4. Serializing Content Blocks
-
-By default, standard content blocks in `content_blocks` are **not written back** into the `content` field. If you need them in `content` (e.g., when sending messages to a downstream client that reads `content`), opt in to serialization.
-
-### Option A: Environment variable (affects all models in the process)
+### Option A: Environment variable
 
 ```bash
 export LC_OUTPUT_VERSION=v1
 ```
 
-### Option B: Per-model initialization parameter
+### Option B: Per-model parameter
 
 ```python
 from langchain.chat_models import init_chat_model
 
 model = init_chat_model(
     "gpt-5-nano",
-    output_version="v1",    # serialize content_blocks into content
+    output_version="v1",
 )
 ```
 
-### Restoring v0 behaviour for OpenAI
+### Anthropic-specific
 
-If your code relies on the old OpenAI responses API format:
+If you need the old behaviour for Anthropic:
 
 ```python
-from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
 
-model = ChatOpenAI(model="gpt-5.4-mini", output_version="v0")
+model = ChatAnthropic(model="claude-sonnet-4-6", output_version="v0")
 ```
 
 ---
 
-## 5. Chat Models
+## 5. Chat Model Initialization
 
-### `init_chat_model` — the unified initializer
+### `init_chat_model` — unified initialization
 
-`init_chat_model` is the recommended way to initialize any chat model in v1. It provides a single API regardless of the underlying provider.
+**Source:** Implied from namespace table in `migrate-complete.md` (Simplified package section)
 
 ```python
 from langchain.chat_models import init_chat_model
@@ -240,269 +146,202 @@ from langchain.chat_models import init_chat_model
 # Initialize by model string (provider inferred)
 model = init_chat_model("gpt-5-nano")
 model = init_chat_model("claude-sonnet-4-6")
-model = init_chat_model("gpt-5.4-mini")
-
-# Basic invocation
-response = model.invoke("What is the capital of India?")
-print(response.text)   # property in v1, not method
-
-# Streaming
-for chunk in model.stream("Tell me a story"):
-    print(chunk.content, end="", flush=True)
 ```
 
-### `BaseChatModel` — for custom implementations
+### `BaseChatModel` return type in v1
 
-If you are building a custom chat model (e.g., wrapping an internal API), subclass `BaseChatModel`. Its `bind_tools` return type has changed in v1:
+**Source:** `migrate-complete.md` (Breaking changes → Updated return type for chat models section)
+
+The return type signature for chat model invocation is now `AIMessage` instead of `BaseMessage`:
 
 ```python
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage
-
-class MyCustomModel(BaseChatModel):
-    
-    def bind_tools(self, tools, **kwargs) -> Runnable[LanguageModelInput, AIMessage]:
-        # v1: return type is AIMessage, not BaseMessage
+# v1 return type
+def bind_tools(
         ...
+    ) -> Runnable[LanguageModelInput, AIMessage]:
 ```
 
-### `max_tokens` default change in `langchain-anthropic`
+---
 
-In v1, `langchain-anthropic` now defaults to higher `max_tokens` values based on the model. If your code relied on the old default of `1024`:
+## 6. Embedding Initialization
+
+### `init_embeddings` — unified initialization
+
+**Source:** Implied from namespace table in `migrate-complete.md` (Simplified package section)
+
+```python
+from langchain.embeddings import init_embeddings
+
+# Initialize by model string
+embedder = init_embeddings("text-embedding-3-small")
+```
+
+---
+
+## 7. Breaking Changes in Messages and Models
+
+All message/model breaking changes in v1:
+
+**Source:** `migrate-complete.md` (Breaking changes section)
+
+| Change | What changed | Impact |
+|---|---|---|
+| `AIMessage.text` | Method → Property | `response.text()` becomes `response.text` |
+| `AIMessage.example` | Removed | Use `additional_kwargs` instead |
+| Chat model return type | `BaseMessage` → `AIMessage` | Custom models must update return type |
+| `bind_tools` return type | `Runnable[..., BaseMessage]` → `Runnable[..., AIMessage]` | Custom models must update signature |
+| `AIMessageChunk` | New `chunk_position` attribute | Indicates final chunk with `"last"` |
+| OpenAI responses format | Various → `content` field | Standard location for responses |
+| Anthropic `max_tokens` | Default was `1024` | Now defaults to higher values per model |
+| Python version | 3.9+ supported | Now requires 3.10+ only |
+
+### `AIMessage.text` property change
+
+**Source:** `migrate-complete.md` (Minor changes section)
+
+```python
+# v1 — use as property
+text = response.text
+
+# v0 — old method (still works with warning)
+text = response.text()
+```
+
+### `AIMessage.example` removal
+
+**Source:** `migrate-complete.md` (Minor changes section)
+
+```python
+# ❌ No longer supported
+AIMessage(content="Hello", example=True)
+
+# ✅ Use additional_kwargs
+AIMessage(content="Hello", additional_kwargs={"is_example": True})
+```
+
+### Anthropic `max_tokens` default
+
+**Source:** `migrate-complete.md` (Breaking changes → Default max_tokens in langchain-anthropic section)
 
 ```python
 from langchain_anthropic import ChatAnthropic
 
-# Explicitly set max_tokens if you need the old behaviour
+# If you need the old default
 model = ChatAnthropic(model="claude-sonnet-4-6", max_tokens=1024)
 ```
 
 ---
 
-## 6. Embeddings
+## 8. Tutorials to Complete
 
-### `init_embeddings` — the unified initializer
-
-Used for creating embeddings for RAG pipelines and vector stores.
-
-```python
-from langchain.embeddings import init_embeddings
-
-# Initialize an embedding model
-embedder = init_embeddings("text-embedding-3-small")   # OpenAI
-embedder = init_embeddings("embed-english-v3.0")        # Cohere
-
-# Embed a single string
-vector = embedder.embed_query("What is LangGraph?")
-
-# Embed multiple documents
-vectors = embedder.embed_documents([
-    "LangGraph is a graph-based agent framework.",
-    "LangChain provides tools for building LLM applications.",
-])
-```
-
-### `Embeddings` base class
-
-```python
-from langchain.embeddings import Embeddings
-
-class MyCustomEmbedder(Embeddings):
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        # your implementation
-        ...
-    
-    def embed_query(self, text: str) -> list[float]:
-        # your implementation
-        ...
-```
-
----
-
-## 7. Breaking Changes in Messages (v1)
-
-Summary of all message-related breaking changes, in one place for easy reference:
-
-| Change | v0 behaviour | v1 behaviour |
-|---|---|---|
-| `AIMessage.text` | Method: `response.text()` | Property: `response.text` (method still works but warns) |
-| `AIMessage.example` | Accepted as parameter | **Removed** — use `additional_kwargs` |
-| Chat model return type | `BaseMessage` | `AIMessage` |
-| `bind_tools` return type | `Runnable[..., BaseMessage]` | `Runnable[..., AIMessage]` |
-| `AIMessageChunk` | No `chunk_position` | Has `chunk_position` attribute (`"last"` for final chunk) |
-| OpenAI responses format | Stored in various places | Stored in message `content` by default |
-| Anthropic `max_tokens` | Default `1024` | Default based on model (higher) |
-| `content_blocks` | Not available | New property on all messages for provider-agnostic blocks |
-| Multimodal messages | Provider-specific `content` list format | `content_blocks` list on `HumanMessage` |
-| `LanguageModelOutputVar` | Typed as `BaseMessage` | Typed as `AIMessage` |
-| AIMessageChunk merging | Simple ID selection | Prioritises provider-assigned IDs over LangChain-generated IDs |
-
----
-
-## 8. Tutorials to Complete in Phase 02
-
-These are the four LangChain tutorials listed in your notes (`oss-complete.md`). Complete them **in this order** — each one builds on the previous.
+These four tutorials from `oss-complete.md` (Learn section) should be completed in Phase 02, in order:
 
 ### Tutorial 1: Semantic Search over PDF
-
-**What you build:** A semantic search engine that lets you query a PDF document using natural language.
-
-**Key concepts covered:**
-- Loading a PDF document
-- Splitting text into chunks
-- Creating embeddings with `init_embeddings`
-- Storing embeddings in a vector store
-- Querying the vector store with a natural language question
-- Returning the most relevant chunks
-
-**This is your introduction to the RAG pipeline components.** You are not yet building an agent — just the retrieval layer.
-
-**Suggested approach:**
-1. Ask your tutor: *"Walk me through the Semantic Search tutorial step by step, citing the source files."*
-2. Build it yourself from scratch after the walkthrough.
-3. Experiment: what happens if you change the chunk size? What if you embed the question differently?
-
----
+**What you build:** A search engine querying a PDF with natural language.
+**Key concepts:** Document loading, embeddings, vector stores, retrieval.
 
 ### Tutorial 2: RAG Agent
-
-**What you build:** A full RAG agent — the semantic search from Tutorial 1, but now wrapped in an agent using `create_agent`.
-
-**Key concepts covered:**
-- Turning the vector store retriever into a `@tool`
-- Passing the retriever tool to `create_agent`
-- The agent loop deciding when to call the retriever
-- Combining retrieved context with the model's response
-
-**This connects Phase 02A (agents/tools) with the RAG pipeline.** After this tutorial you will understand how retrieval fits inside an agent loop.
-
-**Suggested approach:**
-1. Ask your tutor: *"Show me how to convert the Tutorial 1 semantic search into a RAG agent using create_agent."*
-2. Add a second tool (e.g., a web search fallback) and observe how the agent decides which tool to use.
-
----
+**What you build:** A full agent wrapping the semantic search in `create_agent`.
+**Key concepts:** Connecting retrieval to agents, tool integration.
 
 ### Tutorial 3: SQL Agent
-
-**What you build:** An agent that writes and executes SQL queries against a database, with human-in-the-loop review before execution.
-
-**Key concepts covered:**
-- `@tool` for database query execution
-- `HumanInTheLoopMiddleware` (from Phase 02B) applied to the SQL execution tool
-- The agent composing SQL queries from natural language
-- Reviewing and approving/rejecting queries before they run
-
-**This is the first tutorial that uses the middleware system in a real project.** It solidifies your understanding of HITL patterns.
-
-**Suggested approach:**
-1. Ask your tutor: *"Walk me through the SQL Agent tutorial, focusing on how HumanInTheLoopMiddleware is applied."*
-2. Try modifying the `interrupt_on` config to require approval only for `UPDATE` and `DELETE` queries, not `SELECT`.
-
----
+**What you build:** An agent writing and executing SQL with human-in-the-loop review.
+**Key concepts:** Real middleware usage via `HumanInTheLoopMiddleware`.
 
 ### Tutorial 4: Voice Agent
-
-**What you build:** An agent you can speak to and listen to — a multimodal conversational agent.
-
-**Key concepts covered:**
-- Multimodal `HumanMessage` construction with `content_blocks`
-- Audio input and output content blocks
-- How `content_blocks` enables provider-agnostic multimodal handling
-
-**This puts Phase 02C's content blocks knowledge into practice.** After this tutorial you will have touched all four key areas of Phase 02.
-
-**Suggested approach:**
-1. Ask your tutor: *"Explain how the Voice Agent tutorial uses content_blocks for audio input/output."*
-2. Focus on understanding the message structure before running the code.
+**What you build:** A multimodal agent you can speak to.
+**Key concepts:** Audio content blocks, multimodal `HumanMessage` construction.
 
 ---
 
-## 9. Complete Self-Quiz (All 3 Files)
+## 9. Phase 02 Complete Self-Quiz
 
-These 15 questions cover everything in Phase 02A, 02B, and 02C. If you can answer all 15 without looking, you are ready for Phase 03.
+These 15 questions cover everything in Phase 02A, 02B, and 02C. Score 13/15 or higher before proceeding to Phase 03.
 
-1. What function replaced `create_react_agent`? Where is it imported from?
-2. Name three things `tools=` accepts and one thing it no longer accepts.
-3. What is the difference between `system_prompt` and a dynamic prompt? How do you implement each?
-4. What does `@wrap_tool_call` do? Give one example of a case where you should NOT catch the error.
-5. What is the `context=` parameter for? How does it differ from `messages`?
-6. What is the execution order of `before_model` and `after_model` when three middlewares are stacked?
-7. What return value from `before_model` immediately ends the agent loop?
-8. Describe two ways to define custom state in v1. When should you use each?
+1. What is the new import path for `create_agent`? What was it in v0?
+2. Did the `system_prompt` parameter exist in v0? If not, what was it called?
+3. Can you pass a `ToolNode` to the `tools` parameter in v1? If not, what should you pass?
+4. Name one error you SHOULD catch in `@wrap_tool_call`. Name one you SHOULD NOT.
+5. What is the difference between `context=` and `messages=` when invoking an agent?
+6. What method on `AgentMiddleware` do you implement to choose a different model per call?
+7. In v0, how did you pass static metadata to an agent? In v1?
+8. What types are supported for `state_schema` in v1? What types are no longer supported?
 9. What is `message.content_blocks`? How does it differ from `message.content`?
-10. How do you create a multimodal message in v1 that contains both text and an image?
+10. How do you create a multimodal message in v1 with text and an image?
 11. What changed about `AIMessage.text` in v1?
-12. What are the two structured output strategies that replaced prompted output?
-13. What streaming node name should your code filter on in v1?
-14. In the RAG Agent tutorial, how does the retriever become a tool the agent can use?
-15. In the SQL Agent tutorial, which middleware is used to require human approval before executing queries?
+12. What are the two structured output strategies?
+13. What is the new streaming node name in v1?
+14. What method returns `None` to continue normally, or `dict` to update state, or `{"jump_to": "end"}` to short-circuit?
+15. In the SQL Agent tutorial, which middleware is used to require human approval?
 
 ---
 
-## 10. Master Flashcard Deck
+## 10. Phase 02 Master Flashcard Deck
 
-Combined flashcards for all of Phase 02. Study these using spaced repetition — after Phase 02, before Phase 03.
+25 core flashcards for spaced repetition.
 
 | # | Question | Answer |
 |---|---|---|
-| 1 | New import for `create_agent`? | `from langchain.agents import create_agent` |
+| 1 | Import path for `create_agent`? | `from langchain.agents import create_agent` |
 | 2 | Old name of `system_prompt` parameter? | `prompt` |
-| 3 | Does `tools=` accept `ToolNode`? | No — pass a plain list |
-| 4 | What must every `@tool` function have? | A docstring and type-annotated parameters |
-| 5 | What replaced pre/post-model hooks? | Middleware with `before_model` / `after_model` |
-| 6 | How do you pass static context in v1? | `context=Context(...)` on `invoke` / `stream` |
+| 3 | Does v1 accept `ToolNode`? | No — pass a list: `tools=[tool_a, tool_b]` |
+| 4 | What must every `@tool` function have? | Docstring and type-annotated parameters |
+| 5 | What replaced hooks? | Middleware with `before_model` / `after_model` |
+| 6 | How to pass context in v1? | `context=Context(...)` on `invoke` / `stream` |
 | 7 | Streaming node name in v1? | `"model"` (was `"agent"` in v0) |
-| 8 | What state type does `create_agent` support? | `TypedDict` only (via `AgentState`) |
-| 9 | What replaced prompted structured output? | `ToolStrategy` and `ProviderStrategy` |
-| 10 | What does `{"jump_to": "end"}` do in `before_model`? | Short-circuits the agent loop immediately |
-| 11 | Order of `before_model` vs `after_model` in a stack? | `before_model`: list order. `after_model`: reverse order |
-| 12 | Built-in middleware for conversation length? | `SummarizationMiddleware` |
-| 13 | Built-in middleware for human approval? | `HumanInTheLoopMiddleware` |
-| 14 | Which middleware method handles dynamic model selection? | `wrap_model_call` |
-| 15 | Which middleware method wraps tool execution? | `wrap_tool_call` |
-| 16 | What is `message.content_blocks`? | Provider-agnostic standardised content block list (new in v1) |
-| 17 | How do you make a multimodal message in v1? | `HumanMessage(content_blocks=[{"type":"text",...}, {"type":"image",...}])` |
-| 18 | What happened to `AIMessage.text`? | It became a property (not a method) in v1 |
+| 8 | State type in v1? | `TypedDict` only (via `AgentState`) |
+| 9 | What replaced prompted output? | `ToolStrategy` and `ProviderStrategy` |
+| 10 | What does `{"jump_to": "end"}` do? | Short-circuits the agent loop immediately |
+| 11 | Order of `before_model` with 3 middlewares? | List order: middleware[0] → middleware[1] → middleware[2] |
+| 12 | Order of `after_model` with 3 middlewares? | Reverse: middleware[2] → middleware[1] → middleware[0] |
+| 13 | Built-in middleware for conversation length? | `SummarizationMiddleware` |
+| 14 | Built-in middleware for human approval? | `HumanInTheLoopMiddleware` |
+| 15 | Which method chooses models dynamically? | `wrap_model_call` on `AgentMiddleware` |
+| 16 | What is `message.content_blocks`? | Standardised content list (provider-agnostic, v1 only) |
+| 17 | How to create multimodal message? | `HumanMessage(content_blocks=[{"type":"text",...}, {"type":"image",...}])` |
+| 18 | What happened to `AIMessage.text`? | Became a property (not method) in v1 |
 | 19 | What happened to `AIMessage.example`? | Removed — use `additional_kwargs` |
-| 20 | How do you serialize content_blocks into content? | `output_version="v1"` on the model, or `LC_OUTPUT_VERSION=v1` env var |
-| 21 | What is `init_chat_model` for? | Unified initializer for any chat model provider |
-| 22 | What is `init_embeddings` for? | Unified initializer for embedding models (used in RAG) |
-| 23 | What changed with Anthropic `max_tokens` default? | Now defaults to higher values per model (was always 1024 in v0) |
-| 24 | Where is structured output now generated in v1? | In the main loop (not a separate node) |
+| 20 | How to serialize content_blocks? | `output_version="v1"` on model or `LC_OUTPUT_VERSION=v1` env var |
+| 21 | What is `init_chat_model`? | Unified initializer for any chat model |
+| 22 | What is `init_embeddings`? | Unified initializer for embeddings (RAG) |
+| 23 | What changed with Anthropic defaults? | `max_tokens` now per-model (was always 1024) |
+| 24 | Where is structured output generated? | In main loop (not separate node) |
 | 25 | Name the 4 Phase 02 tutorials in order | Semantic Search → RAG Agent → SQL Agent → Voice Agent |
 
 ---
 
 ## 11. Phase 02 Readiness Checklist
 
-Work through this before starting Phase 03.
+✅ Complete this before Phase 03.
 
-### Concepts
-- [ ] I can explain `create_agent` and all its key parameters from memory
-- [ ] I can define a `@tool` function correctly (docstring + type hints)
-- [ ] I understand the difference between `system_prompt` and dynamic prompts
-- [ ] I understand what `context=` is for and how it differs from `messages`
-- [ ] I can explain the middleware execution order (before/after model)
-- [ ] I know when to use `SummarizationMiddleware` vs `HumanInTheLoopMiddleware`
-- [ ] I understand `content_blocks` and how it differs from `content`
-- [ ] I can create a multimodal message using `content_blocks`
+### Understanding
+- [ ] I can explain `create_agent` and all key parameters
+- [ ] I can define a `@tool` correctly (docstring + type hints)
+- [ ] I understand static vs dynamic prompts
+- [ ] I understand `context=` vs `messages=`
+- [ ] I know middleware execution order (before/after)
+- [ ] I understand `content_blocks` vs `content`
+- [ ] I can create multimodal messages
 
 ### Migration knowledge
-- [ ] I know all the v0 → v1 changes in the quick reference table (Phase 02A, §10)
-- [ ] I know all the message breaking changes (Phase 02C, §7)
+- [ ] I know all v0→v1 changes in Phase 02A §13
+- [ ] I know all message breaking changes in §7 above
 
 ### Tutorials
-- [ ] Tutorial 1 completed: Semantic Search over PDF
-- [ ] Tutorial 2 completed: RAG Agent
-- [ ] Tutorial 3 completed: SQL Agent (with HITL)
-- [ ] Tutorial 4 completed: Voice Agent
+- [ ] Semantic Search over PDF — completed
+- [ ] RAG Agent — completed
+- [ ] SQL Agent (with HITL) — completed
+- [ ] Voice Agent — completed
 
 ### Self-assessment
-- [ ] Complete Phase 02 Self-Quiz (§9 in this file) — score 13/15 or higher before proceeding
-- [ ] All Phase 02 files saved to your storage system (GitHub / Obsidian / local)
+- [ ] Phase 02 Complete Self-Quiz (§9) — 13/15 or higher
+- [ ] All Phase 02 files saved to your storage system
+
+### Ready for Phase 03?
+- [ ] All checklist items ticked
 
 ---
 
-> **Next:** [Phase 03 — LangGraph Fundamentals](./phase-03-langgraph.md)  
+> **Next:** Phase 03 — LangGraph Fundamentals  
 > **Previous in Phase 02:** [Phase 02B — Middleware](./phase-02b-middleware.md) · [Phase 02A — Agents & Tools](./phase-02a-agents-and-tools.md)  
-> **Source notes:** `migrate-complete.md` (messages, content blocks, breaking changes), `oss-complete.md` (tutorials list)
+> **Source files used:** `migrate-complete.md` (messages, content blocks, breaking changes), `oss-complete.md` (tutorials list)

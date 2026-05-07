@@ -3,55 +3,37 @@
 > **Level:** Beginner → Intermediate  
 > **Part:** 1 of 3 in Phase 02  
 > **Source files:** `migrate-complete.md` · `oss-complete.md`  
-> **Goal:** Understand how to build agents with `create_agent`, define tools with `@tool`, handle tool errors, and manage runtime context. This is the most important file in Phase 02 — everything else builds on it.
+> **Goal:** Understand how to build agents with `create_agent`, define tools with `@tool`, handle tool errors, and manage runtime context.
+>
+> ⚠️ **Note on examples:** Every code example in this file is extracted directly from your source files with inline source citations. No synthetic or illustrative examples.
 
 ---
 
 ## Table of Contents
 
-1. [The Big Picture — What Is an Agent?](#1-the-big-picture)
-2. [`create_agent` — The Core Function](#2-create_agent)
-3. [Parameters Reference](#3-parameters-reference)
-4. [Prompts — Static and Dynamic](#4-prompts)
-5. [Tools — Defining and Passing Them](#5-tools)
+1. [Import Path Change](#1-import-path-change)
+2. [Basic Agent Pattern](#2-basic-agent-pattern)
+3. [System Prompts — Static](#3-system-prompts--static)
+4. [System Prompts — Dynamic](#4-system-prompts--dynamic)
+5. [Tools — Definition and Usage](#5-tools--definition-and-usage)
 6. [Tool Error Handling](#6-tool-error-handling)
-7. [Runtime Context](#7-runtime-context)
-8. [Structured Output](#8-structured-output)
-9. [Streaming & the Node Name Change](#9-streaming)
-10. [v0 → v1 Migration Quick Reference](#10-v0-v1-migration-quick-reference)
-11. [Self-Quiz](#11-self-quiz)
-12. [Flashcards](#12-flashcards)
+7. [Tools Accessing Custom State](#7-tools-accessing-custom-state)
+8. [Custom State Schema](#8-custom-state-schema)
+9. [Runtime Context](#9-runtime-context)
+10. [Dynamic Model Selection](#10-dynamic-model-selection)
+11. [Structured Output](#11-structured-output)
+12. [Streaming Node Name Change](#12-streaming-node-name-change)
+13. [v0 → v1 Quick Reference](#13-v0-v1-quick-reference)
+14. [Self-Quiz](#14-self-quiz)
+15. [Flashcards](#15-flashcards)
 
 ---
 
-## 1. The Big Picture
+## 1. Import Path Change
 
-An **agent** in LangChain v1 is a loop that:
-1. Receives a user message
-2. Calls a language model
-3. Checks if the model wants to call a tool
-4. Calls that tool and feeds the result back to the model
-5. Repeats until the model produces a final answer
+**Source:** `migrate-complete.md` (Import path section)
 
-In v1, `create_agent` is the single entry point for building this loop. It replaced `create_react_agent` from `langgraph.prebuilt`, which is now deprecated.
-
-```
-User message
-    ↓
-[model node]  ←── system_prompt, middleware
-    ↓
-Tool call? ──Yes──→ [tool executor] ──→ back to model
-    ↓ No
-Final response
-```
-
-> **Key insight:** `create_agent` runs *on top of* LangGraph. Under the hood, it creates a `StateGraph`. You do not need to write any graph code to use it — that comes in Phase 03.
-
----
-
-## 2. `create_agent`
-
-### The import path changed in v1
+The function and package both changed:
 
 ```python
 # v0 (old) — DEPRECATED
@@ -61,100 +43,67 @@ from langgraph.prebuilt import create_react_agent
 from langchain.agents import create_agent
 ```
 
-### Minimal working example
+---
+
+## 2. Basic Agent Pattern
+
+**Source:** `migrate-complete.md` (Prompts → Static prompt rename section)
 
 ```python
 from langchain.agents import create_agent
-from langchain.tools import tool
-
-@tool
-def get_weather(city: str) -> str:
-    """Get the current weather for a city."""
-    return f"It is sunny in {city}."
 
 agent = create_agent(
-    model="claude-sonnet-4-6",   # or "gpt-5.4-mini", etc.
-    tools=[get_weather],
-    system_prompt="You are a helpful weather assistant.",
+    model="claude-sonnet-4-6",
+    tools=[check_weather],
+    system_prompt="You are a helpful assistant"
 )
-
-result = agent.invoke({
-    "messages": [{"role": "user", "content": "What's the weather in Mumbai?"}]
-})
-print(result)
 ```
 
 ---
 
-## 3. Parameters Reference
+## 3. System Prompts — Static
 
-| Parameter | Type | Description |
-|---|---|---|
-| `model` | `str` or `BaseChatModel` | The language model to use. Pass a string (model name) or a model instance. **Do not pass pre-bound models.** |
-| `tools` | `list` | List of tools. Accepts `@tool`-decorated functions, `BaseTool` instances, or callables with type hints and docstrings. **Does NOT accept `ToolNode`.** |
-| `system_prompt` | `str` | Static system prompt string. Renamed from `prompt` in v0. |
-| `middleware` | `list` | List of middleware objects. Replaces pre/post-model hooks from v0. |
-| `context_schema` | `dataclass` | Schema for static runtime context. Replaces `config["configurable"]` from v0. |
-| `state_schema` | `TypedDict subclass` | Custom state schema extending `AgentState`. Only `TypedDict` supported — no Pydantic or dataclasses. |
-| `response_format` | `ToolStrategy` or `ProviderStrategy` | For structured output. Prompted output (`str, Schema`) is no longer supported. |
+### Rename from `prompt` to `system_prompt`
 
-### What is no longer accepted
+**Source:** `migrate-complete.md` (Prompts → Static prompt rename section)
 
 ```python
-# ❌ Pre-bound models — no longer supported
-model_with_tools = ChatOpenAI().bind_tools([some_tool])
-agent = create_agent(model_with_tools, tools=[])
+# v1 (new) — correct
+from langchain.agents import create_agent
 
-# ✅ Use this instead
-agent = create_agent("gpt-5.4-mini", tools=[some_tool])
-
-# ❌ ToolNode — no longer accepted in tools list
-from langgraph.prebuilt import ToolNode
-agent = create_agent(model, tools=ToolNode([tool_a, tool_b]))
-
-# ✅ Use this instead
-agent = create_agent(model, tools=[tool_a, tool_b])
-
-# ❌ Pydantic state schema — no longer supported
-class MyState(BaseModel):
-    user_id: str
-
-# ✅ Use TypedDict via AgentState
-from langchain.agents import AgentState
-class MyState(AgentState):
-    user_id: str
+agent = create_agent(
+    model="claude-sonnet-4-6",
+    tools=[check_weather],
+    system_prompt="You are a helpful assistant"
+)
 ```
+
+### SystemMessage → string conversion
+
+**Source:** `migrate-complete.md` (Prompts → SystemMessage to string section)
+
+If you have a `SystemMessage` object, extract the string content:
+
+```python
+# v1 (new) — use plain string
+from langchain.agents import create_agent
+
+agent = create_agent(
+    model="claude-sonnet-4-6",
+    tools=[check_weather],
+    system_prompt="You are a helpful assistant"
+)
+```
+
+The old pattern of passing `SystemMessage(content="...")` is no longer needed.
 
 ---
 
-## 4. Prompts
+## 4. System Prompts — Dynamic
 
-### Static prompt (most common)
+Dynamic prompts adapt based on runtime context (e.g., user role, conversation state).
 
-The `prompt` parameter was renamed to `system_prompt` in v1. Always pass a plain string.
-
-```python
-# v1 — correct
-agent = create_agent(
-    model="claude-sonnet-4-6",
-    tools=[get_weather],
-    system_prompt="You are a helpful assistant."   # ✅ plain string
-)
-
-# v0 — old pattern, do not use
-from langchain.messages import SystemMessage
-agent = create_react_agent(
-    model="claude-sonnet-4-6",
-    tools=[get_weather],
-    prompt=SystemMessage(content="You are a helpful assistant.")  # ❌ deprecated
-)
-```
-
-> **Rule:** If you have a `SystemMessage` object, extract its `.content` string and pass that to `system_prompt`.
-
-### Dynamic prompt
-
-Dynamic prompts adapt the system prompt at runtime based on context (e.g., user role, account tier). This is a **context engineering** pattern. Use the `@dynamic_prompt` decorator and pass it as middleware.
+**Source:** `migrate-complete.md` (Dynamic prompts section)
 
 ```python
 from dataclasses import dataclass
@@ -164,115 +113,144 @@ from langgraph.runtime import Runtime
 
 @dataclass
 class Context:
-    user_role: str = "user"   # "user" | "expert" | "beginner"
+    user_role: str = "user"
 
 @dynamic_prompt
-def my_dynamic_prompt(request: ModelRequest) -> str:
+def dynamic_prompt(request: ModelRequest) -> str:
     user_role = request.runtime.context.user_role
-    base = "You are a helpful assistant."
+    base_prompt = "You are a helpful assistant."
 
     if user_role == "expert":
-        return f"{base} Provide detailed technical responses."
+        prompt = (
+            f"{base_prompt} Provide detailed technical responses."
+        )
     elif user_role == "beginner":
-        return f"{base} Explain concepts simply and avoid jargon."
-    return base
+        prompt = (
+            f"{base_prompt} Explain concepts simply and avoid jargon."
+        )
+    else:
+        prompt = base_prompt
+
+    return prompt
 
 agent = create_agent(
     model="gpt-5.4",
     tools=tools,
-    middleware=[my_dynamic_prompt],
+    middleware=[dynamic_prompt],
     context_schema=Context
 )
 
-# Invoke with context
+# Use with context
 agent.invoke(
     {"messages": [{"role": "user", "content": "Explain async programming"}]},
     context=Context(user_role="expert")
 )
 ```
 
-**When to use dynamic prompts:**
-- Different user tiers (free vs. pro)
-- Different roles (admin vs. viewer)
-- Personalisation based on user metadata
-- A/B testing prompt variations
-
 ---
 
-## 5. Tools
+## 5. Tools — Definition and Usage
 
-### Defining a tool with `@tool`
+### Basic tool definition with `@tool`
 
-The simplest way to define a tool is to decorate a Python function with `@tool`. The function must have:
-- A docstring (this becomes the tool's description sent to the model)
-- Type-annotated parameters (these define the tool's input schema)
-
-```python
-from langchain.tools import tool
-
-@tool
-def search_web(query: str) -> str:
-    """Search the web for information about a topic."""
-    # your actual implementation here
-    return f"Results for: {query}"
-
-@tool
-def calculate(expression: str) -> str:
-    """Evaluate a mathematical expression and return the result."""
-    try:
-        return str(eval(expression))
-    except Exception as e:
-        return f"Error: {e}"
-```
-
-### What the `tools` parameter accepts
+**Source:** `migrate-complete.md` (Tools section)
 
 ```python
 from langchain.agents import create_agent
-from langchain.tools import tool, BaseTool
-
-# 1. @tool-decorated functions ✅
-@tool
-def get_stock_price(ticker: str) -> str:
-    """Get the current price for a stock ticker."""
-    return f"Price for {ticker}: $100"
-
-# 2. Plain callables with type hints and docstring ✅
-def get_news(topic: str) -> str:
-    """Get recent news about a topic."""
-    return f"News about {topic}"
-
-# 3. BaseTool subclass instances ✅
-class MyCustomTool(BaseTool):
-    name: str = "my_tool"
-    description: str = "Does something custom"
-    def _run(self, input: str) -> str:
-        return f"Result: {input}"
 
 agent = create_agent(
     model="claude-sonnet-4-6",
-    tools=[
-        get_stock_price,       # @tool decorated
-        get_news,              # plain callable
-        MyCustomTool(),        # BaseTool instance
-    ]
+    tools=[check_weather, search_web]
 )
 ```
 
-### Tools accessing custom state
+The `tools` list accepts:
+- `@tool`-decorated functions
+- Plain callables with type hints and docstrings
+- `dict` representing built-in provider tools
 
-When a tool needs to read from the agent's state (e.g., to get `user_name`), use `ToolRuntime`:
+### What tools parameter no longer accepts
+
+**Source:** `migrate-complete.md` (Tools section)
+
+```python
+# v0 (old) — ToolNode no longer accepted
+from langgraph.prebuilt import create_react_agent, ToolNode
+
+agent = create_react_agent(
+    model="claude-sonnet-4-6",
+    tools=ToolNode([check_weather, search_web])  # ❌ NOT ALLOWED IN V1
+)
+
+# v1 (new) — pass a plain list
+from langchain.agents import create_agent
+
+agent = create_agent(
+    model="claude-sonnet-4-6",
+    tools=[check_weather, search_web]            # ✅ CORRECT
+)
+```
+
+---
+
+## 6. Tool Error Handling
+
+### Using `@wrap_tool_call` middleware
+
+**Source:** `migrate-complete.md` (Tools → Handling tool errors section)
+
+```python
+from langchain.agents import create_agent
+from langchain.agents.middleware import wrap_tool_call
+from langchain.messages import ToolMessage
+
+@wrap_tool_call
+def handle_tool_errors(request, handler):
+    """Handle tool execution errors with custom messages."""
+    try:
+        return handler(request)
+    except Exception as e:
+        # Only handle errors that occur during tool execution due to invalid inputs
+        # that pass schema validation but fail at runtime (e.g., invalid SQL syntax).
+        # Do NOT handle:
+        # - Network failures (use tool retry middleware instead)
+        # - Incorrect tool implementation errors (should bubble up)
+        # - Schema mismatch errors (already auto-handled by the framework)
+        #
+        # Return a custom error message to the model
+        return ToolMessage(
+            content=f"Tool error: Please check your input and try again. ({str(e)})",
+            tool_call_id=request.tool_call["id"]
+        )
+
+agent = create_agent(
+    model="claude-sonnet-4-6",
+    tools=[check_weather, search_web],
+    middleware=[handle_tool_errors]
+)
+```
+
+---
+
+## 7. Tools Accessing Custom State
+
+### Using ToolRuntime for state access
+
+**Source:** `migrate-complete.md` (Custom state → Defining state via state_schema section)
 
 ```python
 from langchain.tools import tool, ToolRuntime
 from langchain.agents import create_agent, AgentState
 
+# Define custom state extending AgentState
 class CustomState(AgentState):
     user_name: str
 
 @tool
-def greet(runtime: ToolRuntime[None, CustomState]) -> str:
-    """Greet the current user by name."""
+def greet(
+    runtime: ToolRuntime[None, CustomState]
+) -> str:
+    """Use this to greet the user by name."""
     user_name = runtime.state.get("user_name", "Unknown")
     return f"Hello {user_name}!"
 
@@ -285,54 +263,57 @@ agent = create_agent(
 
 ---
 
-## 6. Tool Error Handling
+## 8. Custom State Schema
 
-In v0, tool error handling was done by wrapping tools in a `ToolNode`. In v1, it is done via middleware using the `@wrap_tool_call` decorator.
+### TypedDict via AgentState (only supported type)
 
-### When to handle tool errors
-
-Handle errors that occur during **runtime** — inputs that pass schema validation but fail at execution (e.g., invalid SQL syntax, a city name that doesn't match an API's format).
-
-**Do NOT handle:**
-- Network failures (use a retry middleware instead)
-- Incorrect tool implementation bugs (let them bubble up for debugging)
-- Schema mismatch errors (the framework auto-handles these)
+**Source:** `migrate-complete.md` (Custom state → State type restrictions section)
 
 ```python
-from langchain.agents import create_agent
-from langchain.agents.middleware import wrap_tool_call
-from langchain.messages import ToolMessage
+from langchain.agents import AgentState, create_agent
 
-@wrap_tool_call
-def handle_tool_errors(request, handler):
-    """Return a friendly error message instead of crashing."""
-    try:
-        return handler(request)
-    except Exception as e:
-        return ToolMessage(
-            content=f"Tool error: Please check your input and try again. ({str(e)})",
-            tool_call_id=request.tool_call["id"]
-        )
+# AgentState is a TypedDict
+class CustomAgentState(AgentState):
+    user_id: str
 
 agent = create_agent(
     model="claude-sonnet-4-6",
-    tools=[search_web, calculate],
-    middleware=[handle_tool_errors]
+    tools=tools,
+    state_schema=CustomAgentState
 )
+```
+
+### What is no longer supported
+
+**Source:** `migrate-complete.md` (Custom state → State type restrictions section)
+
+```python
+# ❌ v0 pattern — Pydantic no longer supported
+from pydantic import BaseModel
+
+class AgentState(BaseModel):
+    messages: Annotated[list[AnyMessage], add_messages]
+    user_id: str
+
+# ❌ v0 pattern — dataclass no longer supported
+@dataclass
+class AgentState:
+    user_id: str
+
+# ✅ v1 pattern — TypedDict via AgentState
+from langchain.agents import AgentState
+
+class AgentState(AgentState):
+    user_id: str
 ```
 
 ---
 
-## 7. Runtime Context
+## 9. Runtime Context
 
-Agents receive two types of data at invocation time:
+Static context (user metadata that doesn't change during the conversation) is passed separately from dynamic state (messages).
 
-| Type | Examples | How to pass |
-|---|---|---|
-| **Dynamic state** | Message history, tool call results | Always via `messages` key in `invoke` |
-| **Static context** | User ID, session ID, user role | Via `context=` parameter on `invoke`/`stream` |
-
-### Passing static context (v1 pattern)
+**Source:** `migrate-complete.md` (Runtime context section)
 
 ```python
 from dataclasses import dataclass
@@ -342,50 +323,84 @@ from langchain.agents import create_agent
 class Context:
     user_id: str
     session_id: str
-    subscription_tier: str = "free"
 
 agent = create_agent(
-    model="claude-sonnet-4-6",
+    model=model,
     tools=tools,
     context_schema=Context
 )
 
 result = agent.invoke(
     {"messages": [{"role": "user", "content": "Hello"}]},
-    context=Context(user_id="u_123", session_id="s_abc", subscription_tier="pro")
+    context=Context(user_id="123", session_id="abc")
 )
 ```
 
-### v0 vs v1 comparison
+### v0 pattern (old, still works but not recommended)
+
+**Source:** `migrate-complete.md` (Runtime context section)
 
 ```python
-# v0 — old pattern (still works but not recommended for new code)
+# v0 — old pattern, still works for backward compatibility
 result = agent.invoke(
-    {"messages": [...]},
+    {"messages": [{"role": "user", "content": "Hello"}]},
     config={
         "configurable": {
-            "user_id": "u_123",
-            "session_id": "s_abc"
+            "user_id": "123",
+            "session_id": "abc"
         }
     }
 )
-
-# v1 — new pattern (preferred)
-result = agent.invoke(
-    {"messages": [...]},
-    context=Context(user_id="u_123", session_id="s_abc")
-)
 ```
 
-> **Note from your notes:** The old `config["configurable"]` pattern still works for backward compatibility, but using the new `context` parameter is recommended for new applications.
+> From your notes: "The old `config["configurable"]` pattern still works for backward compatibility, but using the new `context` parameter is recommended for new applications or applications migrating to v1."
 
 ---
 
-## 8. Structured Output
+## 10. Dynamic Model Selection
 
-When you need the agent to return a structured response (not just free-form text), use `response_format` with one of two strategies.
+Choose a different model per request based on conversation state.
 
-### Two strategies in v1
+**Source:** `migrate-complete.md` (Model → Dynamic model selection section)
+
+```python
+from langchain.agents import create_agent
+from langchain.agents.middleware import (
+    AgentMiddleware, ModelRequest
+)
+from langchain.agents.middleware.types import ModelResponse
+from langchain_openai import ChatOpenAI
+from typing import Callable
+
+basic_model = ChatOpenAI(model="gpt-5-nano")
+advanced_model = ChatOpenAI(model="gpt-5.4")
+
+class DynamicModelMiddleware(AgentMiddleware):
+
+    def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]) -> ModelResponse:
+        if len(request.state.messages) > self.messages_threshold:
+            model = advanced_model
+        else:
+            model = basic_model
+        return handler(request.override(model=model))
+
+    def __init__(self, messages_threshold: int) -> None:
+        self.messages_threshold = messages_threshold
+
+agent = create_agent(
+    model=basic_model,
+    tools=tools,
+    middleware=[DynamicModelMiddleware(messages_threshold=10)]
+)
+```
+
+---
+
+## 11. Structured Output
+
+Generate structured JSON responses from agents.
+
+**Source:** `migrate-complete.md` (Structured output → Tool and provider strategies section)
 
 ```python
 from langchain.agents import create_agent
@@ -394,73 +409,48 @@ from pydantic import BaseModel
 
 class OutputSchema(BaseModel):
     summary: str
-    sentiment: str   # "positive" | "negative" | "neutral"
+    sentiment: str
 
-# Option A: ToolStrategy — uses artificial tool calling
+# Using ToolStrategy (artificial tool calling)
 agent = create_agent(
     model="gpt-5.4-mini",
     tools=tools,
     response_format=ToolStrategy(OutputSchema)
 )
-
-# Option B: ProviderStrategy — uses provider-native structured output
-agent = create_agent(
-    model="gpt-5.4-mini",
-    tools=tools,
-    response_format=ProviderStrategy(OutputSchema)
-)
 ```
 
-### What was removed
+### Prompted output removed
 
-**Prompted output** is no longer supported. The old pattern of passing `("please generate ...", OutputSchema)` as `response_format` has been removed because it proved unreliable compared to tool-based and provider-native strategies.
+**Source:** `migrate-complete.md` (Structured output → Prompted output removed section)
 
-```python
-# ❌ No longer supported — removed in v1
-agent = create_react_agent(
-    model="gpt-5.4-mini",
-    tools=tools,
-    response_format=("please generate the following schema:", OutputSchema)
-)
 ```
-
-### Where structured output is now generated
-
-In v0, structured output was generated in a **separate node** after the main agent loop. In v1, it is generated **in the main loop**, which reduces both cost and latency.
+Prompted output is no longer supported via the `response_format` argument.
+Compared to strategies like artificial tool calling and provider native 
+structured output, prompted output has not proven to be particularly reliable.
+```
 
 ---
 
-## 9. Streaming
+## 12. Streaming Node Name Change
 
-### The node name changed
+When streaming agent execution, filter on the node name.
 
-When streaming events from agents, the model node was renamed from `"agent"` to `"model"`. If you have code that filters streaming events by node name, update it.
+**Source:** `migrate-complete.md` (Streaming node name rename section)
+
+In v1, the streaming node was renamed from `"agent"` to `"model"`:
 
 ```python
-# v0 — checking for "agent" node
+# v1 — check for "model" node
 for event in agent.stream({"messages": [...]}):
-    if "agent" in event:          # ❌ won't match in v1
-        print(event["agent"])
-
-# v1 — checking for "model" node
-for event in agent.stream({"messages": [...]}):
-    if "model" in event:          # ✅ correct in v1
+    if "model" in event:
         print(event["model"])
 ```
 
-### Streaming with context
-
-```python
-for event in agent.stream(
-    {"messages": [{"role": "user", "content": "Analyse this data..."}]},
-    context=Context(user_id="u_123")
-):
-    print(event)
-```
-
 ---
 
-## 10. v0 → v1 Migration Quick Reference
+## 13. v0 → v1 Quick Reference
+
+**Source:** `migrate-complete.md` (entire `create_react_agent` → `create_agent` section)
 
 | What changed | v0 (old) | v1 (new) |
 |---|---|---|
@@ -469,53 +459,60 @@ for event in agent.stream(
 | System prompt param | `prompt="..."` | `system_prompt="..."` |
 | SystemMessage in prompt | `prompt=SystemMessage(content="...")` | `system_prompt="..."` (extract string) |
 | Tools list | `tools=ToolNode([tool_a, tool_b])` | `tools=[tool_a, tool_b]` |
-| Tool error handling | `ToolNode(handle_tool_errors=fn)` | `@wrap_tool_call` middleware |
+| Tool error handling | Part of `ToolNode` initialization | `@wrap_tool_call` middleware |
 | Pre-model hook | `pre_model_hook=fn` | `before_model` method on `AgentMiddleware` |
 | Post-model hook | `post_model_hook=fn` | `after_model` method on `AgentMiddleware` |
 | Static context | `config={"configurable": {...}}` | `context=Context(...)` |
-| Dynamic prompt | function passed to `prompt=` | `@dynamic_prompt` middleware |
+| Dynamic prompt | Function passed to `prompt=` | `@dynamic_prompt` middleware |
 | State schema | Pydantic or dataclass | `TypedDict` only (inherit from `AgentState`) |
 | Streaming node name | `"agent"` | `"model"` |
 | Pre-bound model | `ChatOpenAI().bind_tools([...])` | Not supported — pass model string directly |
 
 ---
 
-## 11. Self-Quiz
+## 14. Self-Quiz
 
-1. What is the new import path for creating agents in v1?
-2. What three types of objects does `tools=` accept? What does it no longer accept?
-3. What is the difference between `system_prompt` and a dynamic prompt? When would you use each?
-4. A tool receives a city name, calls a weather API, and the API returns a 404. Should you handle this in `@wrap_tool_call`? Why or why not?
-5. What is the `context=` parameter for? What's the difference between `context` and `messages`?
-6. You have an existing agent that uses `config={"configurable": {"user_id": "123"}}`. Is this broken in v1? What should you migrate to?
-7. What two strategies replaced prompted output for structured responses?
-8. Your streaming code filters on `event["agent"]`. What do you need to change for v1?
-9. Can you pass a Pydantic model as `state_schema`? What should you use instead?
-10. What happens to `ValidationNode` in v1? What replaces it?
+1. What is the new import path for `create_agent` in v1?
+2. Did the `system_prompt` parameter exist in v0? What was it called?
+3. Can you pass a `ToolNode` to the `tools` parameter in v1?
+4. Name one error you SHOULD catch in `@wrap_tool_call`. Name one you SHOULD NOT.
+5. What is the difference between `context=` and `messages=` when invoking an agent?
+6. You want to use different models based on conversation length. Which method on `AgentMiddleware` do you implement?
+7. In v0, how did you pass static metadata to an agent? How do you do it in v1?
+8. What state types are supported in v1? What types are no longer supported?
+9. What happens to `SystemMessage` objects in v1? How should you migrate them?
+10. What is the new streaming node name in v1?
+11. What does `request.override(model=new_model)` do?
+12. Can you still use `config["configurable"]` in v1? Should you for new code?
+13. What are the two structured output strategies that replaced prompted output?
+14. What are the three things `tools=` accepts in v1?
+15. What does a tool need to have to be valid (besides the `@tool` decorator)?
 
 ---
 
-## 12. Flashcards
+## 15. Flashcards
+
+Study these before moving to Phase 02B.
 
 | # | Question | Answer |
 |---|---|---|
-| 1 | New import for agent creation in v1? | `from langchain.agents import create_agent` |
-| 2 | What was `create_react_agent` renamed to? | `create_agent` |
-| 3 | What was the `prompt` parameter renamed to? | `system_prompt` |
-| 4 | Does `tools=` accept `ToolNode` in v1? | No — pass a plain list: `tools=[tool_a, tool_b]` |
-| 5 | What decorator turns a function into a tool? | `@tool` from `langchain.tools` |
-| 6 | What must every tool function have? | A docstring (description) and type-annotated parameters |
-| 7 | What replaced pre/post-model hooks? | Middleware with `before_model` / `after_model` methods |
-| 8 | How do you pass static context in v1? | `context=Context(...)` on `invoke`/`stream` |
-| 9 | What is the streaming node name in v1? | `"model"` (was `"agent"` in v0) |
-| 10 | Are pre-bound models supported in `create_agent`? | No — pass model string or unbound model instance |
-| 11 | What state schema types are supported in v1? | `TypedDict` only — via `AgentState` inheritance |
-| 12 | What replaced prompted structured output? | `ToolStrategy` and `ProviderStrategy` |
-| 13 | What is `@wrap_tool_call` for? | Middleware decorator for handling runtime tool execution errors |
-| 14 | What errors should `@wrap_tool_call` NOT handle? | Network failures, implementation bugs, schema mismatch errors |
-| 15 | Where is structured output generated in v1? | In the main agent loop (not a separate node) |
+| 1 | Import path for `create_agent` in v1? | `from langchain.agents import create_agent` |
+| 2 | What was `system_prompt` called in v0? | `prompt` |
+| 3 | Does v1 accept `ToolNode` in tools list? | No — pass a plain list: `tools=[tool_a, tool_b]` |
+| 4 | What must every `@tool` function have? | A docstring and type-annotated parameters |
+| 5 | What replaced pre-model hooks? | `before_model` method on `AgentMiddleware` |
+| 6 | What replaced post-model hooks? | `after_model` method on `AgentMiddleware` |
+| 7 | How do you pass context in v1? | `context=Context(...)` on `invoke` / `stream` |
+| 8 | Streaming node name in v1? | `"model"` (was `"agent"` in v0) |
+| 9 | State type in v1? | `TypedDict` only (via `AgentState`) |
+| 10 | What replaced prompted structured output? | `ToolStrategy` and `ProviderStrategy` |
+| 11 | What does `{"jump_to": "end"}` from `before_model` do? | Short-circuits the agent loop immediately |
+| 12 | Can you access agent state in a tool? | Yes, via `runtime: ToolRuntime[None, CustomState]` |
+| 13 | What does `request.override(model=x)` do? | Creates a new request with a different model |
+| 14 | Is `config["configurable"]` deprecated? | No, still works, but `context=` is preferred for new code |
+| 15 | What type is `AgentState`? | A `TypedDict` that you inherit from for custom state |
 
 ---
 
 > **Next in Phase 02:** [Phase 02B — Middleware Deep Dive](./phase-02b-middleware.md)  
-> **Source notes:** `migrate-complete.md` (all agent/tool patterns), `oss-complete.md` (tutorials list)
+> **Source files used:** `migrate-complete.md` (all sections cited inline)
