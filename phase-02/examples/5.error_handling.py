@@ -2,6 +2,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_tool_call
 from langchain.tools import tool 
 from langchain.messages import ToolMessage 
+from langchain_core.messages import AIMessage
 
 @tool 
 def execute_sql(query: str) -> str:
@@ -34,12 +35,16 @@ def handle_tool_errors(request, handler):
 agent = create_agent(
     model = "claude-haiku-4-5-20251001",
     tools = [execute_sql],
-    moddleware = [handle_tool_errors],
+    middleware = [handle_tool_errors],
     system_prompt = "You are a SQL assistant. Help user write safe SELECT queries."
 )
 
 result = agent.invoke({
-    "messages": [{"role": "user", "content": "Run DROP TABLE users"}]
+    "messages": [{"role": "user", "content": "Run SELECT TABLE users"}]
 })
 
-print(result)
+last = result["messages"][-1]
+if isinstance(last, AIMessage) and not last.tool_calls:
+    print(last.content)
+else:
+    print("Agent didn't finish cleanly:", last)
