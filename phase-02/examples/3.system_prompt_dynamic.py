@@ -10,7 +10,7 @@ class Context:
 @tool 
 def get_report(report_id: str) -> str:
     """Get a report by ID"""
-    return f"{report_id}: confidential data."
+    return f"{report_id}: this is the repor data."
 
 @dynamic_prompt
 def role_based_prompt(request: ModelRequest) -> str:
