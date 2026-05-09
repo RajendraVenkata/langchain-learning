@@ -44,3 +44,4 @@ result_viewer = agent.invoke({
     context = Context(user_role="viewer")
 )
 
+print("Viewer result", result_viewer)
