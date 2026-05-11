@@ -22,3 +22,5 @@ response_openai = model_openai.invoke("Explain photosynthesis")
 for block in response_openai.content_blocks:
     if block["type"] == "text":
         print(f"Text: {block['text']}")
+
+        
