@@ -732,7 +732,33 @@ agent.invoke(
 )
 ```
 
-The `Runtime` carries five things: **context** (static per‑run deps), **store** (long‑term memory), **stream writer** (custom streaming), **execution_info** (`thread_id`/`run_id`/retry attempt), and **server_info** (assistant/graph id + authenticated user, populated only on LangGraph Server — `None` locally). Middleware gets the same `Runtime` (node‑style hooks receive it directly; wrap‑style hooks read `request.runtime`), which is how you build a *dynamic* system prompt — the thing `system_prompt=` cannot do because it's static:
+The `Runtime` is LangGraph's per‑invocation object, and it carries **five things** — the dependencies and metadata a tool or middleware might need *without* reaching for globals:
+
+1. **`runtime.context`** — the *static, per‑run* inputs you pass at invoke time (user id, DB connections, API keys, feature flags). Its shape is declared by `context_schema=` and supplied via `context=`; read it as `runtime.context.user_id` (dataclass) or `runtime.context["user_id"]` (TypedDict). It's **immutable for the run** — this is the core dependency‑injection channel, and the reason tools become testable (you pass a fake `Context` instead of patching globals).
+2. **`runtime.store`** — the long‑term‑memory `BaseStore`, present only if you wired `store=` on `create_agent` (Section 2.5). `runtime.store.get((namespace,), key)` returns an item whose `.value` holds your data; it's `None` when no store is configured, so guard with `if runtime.store:`.
+3. **`runtime.stream_writer`** — a function to emit *custom* progress events into the `"custom"` stream mode (e.g. `runtime.stream_writer("Fetched 10/100 records")`), so a long‑running tool can report fine‑grained progress to the UI. It only works inside a LangGraph execution context (i.e. while the agent is actually running).
+4. **`runtime.execution_info`** — identity + retry metadata for *this* run: `.thread_id`, `.run_id`, and `.node_attempt` (the attempt number — `1` on the first try, `2` on the first retry, …). Useful for logging, idempotency keys, or branching to a fallback on a retry.
+5. **`runtime.server_info`** — deployment metadata, populated **only when running on LangGraph Server**: `.assistant_id`, `.graph_id`, and `.user` (the authenticated user → `.user.identity`). It is **`None` during local development**, so always null‑check it before reading.
+
+(`runtime.execution_info` and `runtime.server_info` require `deepagents>=0.5.0` or `langgraph>=1.1.5`.)
+
+Inside a tool, the whole object arrives via the `ToolRuntime[Context]` parameter (hidden from the model). An identity‑aware tool reading the last two — execution and server info — looks like this:
+
+```python
+from langchain.tools import tool, ToolRuntime
+
+@tool
+def whoami(runtime: ToolRuntime) -> str:
+    """Report execution + server identity for the current run."""
+    info = runtime.execution_info
+    line = f"thread={info.thread_id} run={info.run_id} attempt={info.node_attempt}"
+    server = runtime.server_info                 # None during local dev — always null-check
+    if server is not None and server.user is not None:
+        line += f" user={server.user.identity} assistant={server.assistant_id}"
+    return line
+```
+
+Middleware gets the **same** `Runtime` — node‑style hooks (`@before_model`/`@after_model`) receive it as a parameter; wrap‑style hooks read it from `request.runtime`. That's how you build a *dynamic* system prompt — the thing `system_prompt=` cannot do because it's static:
 
 ```python
 from langchain.agents.middleware import dynamic_prompt, ModelRequest
