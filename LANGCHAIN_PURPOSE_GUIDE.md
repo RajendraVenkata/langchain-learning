@@ -366,9 +366,169 @@ def handle_tool_errors(request: ToolCallRequest,
 agent = create_agent(model="anthropic:claude-sonnet-4-6", tools=[], middleware=[handle_tool_errors])
 ```
 
-> **Advanced — dynamic tool selection.** Too many tools overwhelm the model and increase errors; too few limit capability. Two patterns: **(1) filter** pre‑registered tools per request with `@wrap_model_call` + `request.override(tools=filtered)` (e.g. only expose sensitive tools after authentication); **(2) register tools discovered at runtime** (e.g. from an MCP server) using *both* `wrap_model_call` (to add the tool to the request) and `wrap_tool_call` (to actually execute it). Without the second hook the agent wouldn't know how to run a tool it just learned about.
+#### Going deeper: the `wrap_tool_call` contract
 
-> **Advanced — headless tools.** A tool can be *schema‑only on the server* and *implemented on the client* (browser). The server tool calls `interrupt(...)`, the frontend runs the real implementation (geolocation, IndexedDB, clipboard), and the run resumes with the result. This is how you reach device‑local capabilities — covered fully in Part 10.
+`@wrap_tool_call` is a **wrap‑style middleware hook** that fires once *around every tool execution* — the tool‑call analogue of `wrap_model_call` (Part 4). Its power is that you receive both the pending call and the *means to run it*, and you decide what happens:
+
+- **`request: ToolCallRequest`** (`langchain.tools.tool_node`) — the pending call. Read `request.tool_call["name"]`, `["args"]`, and `["id"]`; `request.override(tool=..., ...)` returns a modified request (swap the tool implementation or its args before running).
+- **`handler(request)`** — this is what *actually executes the tool*, returning a `ToolMessage` (or a `Command`). **You control whether and how it runs:**
+  - call it once and return the result → **pass‑through** (logging/metrics),
+  - wrap it in `try/except` → **error handling** (the example above),
+  - call it again after a failure → **retry**,
+  - call it with `request.override(...)` → **redirect** to a different tool or args,
+  - *don't* call it and return your own `ToolMessage` → **short‑circuit** (mock, deny, or serve from cache).
+
+It's registered via `middleware=[...]` on `create_agent` and applies to **every** tool — branch on `request.tool_call["name"]` to target a specific one. Like all wrap hooks, multiple `wrap_tool_call` middleware **nest**: the first in the list is the outermost layer (Part 4), so it sees the final result and wins on conflicts.
+
+A monitoring example — a pass‑through that observes every call. Note the return type is `ToolMessage | Command` (tools may return either):
+
+```python
+from collections.abc import Callable
+from langchain.agents.middleware import wrap_tool_call
+from langchain.messages import ToolMessage
+from langchain.tools.tool_node import ToolCallRequest
+from langgraph.types import Command
+
+@wrap_tool_call
+def monitor_tool(
+    request: ToolCallRequest,
+    handler: Callable[[ToolCallRequest], ToolMessage | Command],
+) -> ToolMessage | Command:
+    print(f"→ {request.tool_call['name']}({request.tool_call['args']})")  # inspect the pending call
+    try:
+        result = handler(request)                                         # run the tool
+        print("✓ completed")
+        return result
+    except Exception:
+        print("✗ failed")
+        raise                                                             # re-raise (or convert to a ToolMessage)
+```
+
+#### Advanced: dynamic tool selection
+
+Too many tools overwhelm the model (context overload → more errors); too few limit it. **Dynamic tool selection** adapts the available toolset at runtime — by auth state, permissions, feature flags, or conversation stage. There are two approaches, depending on whether the tools are known up front.
+
+**(1) Filter pre‑registered tools** — when every possible tool is known at creation time, register them all and *filter what the model sees per call* with `@wrap_model_call` + `request.override(tools=...)`. The filter can read **State**, **Store**, or **Runtime Context**:
+
+```python
+from typing import Callable
+from langchain.agents import create_agent
+from langchain.agents.middleware import wrap_model_call, ModelRequest, ModelResponse
+
+@wrap_model_call
+def state_based_tools(request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]) -> ModelResponse:
+    """Expose sensitive tools only after the user authenticates."""
+    if not request.state.get("authenticated", False):                 # read conversation State
+        public = [t for t in request.tools if t.name.startswith("public_")]
+        request = request.override(tools=public)                      # the model only sees these this call
+    return handler(request)
+
+agent = create_agent(
+    model="gpt-5.4",
+    tools=[public_search, private_search, advanced_search],            # ALL registered up front
+    middleware=[state_based_tools],
+)
+```
+
+The same shape filters by user role from **Runtime Context** (`request.runtime.context.user_role` → admins keep all tools, editors lose `delete_data`, viewers get only `read_`‑prefixed tools) or by per‑user feature flags from the **Store** (`request.runtime.store.get(("features",), user_id)`). The tools are static; only their *visibility* is dynamic.
+
+**(2) Register tools discovered at runtime** — when tools aren't known until run time (loaded from an MCP server, generated from user data, fetched from a registry), you must both *add* the tool and *teach the agent to run it*. This needs **two** hooks on one `AgentMiddleware`:
+
+```python
+from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware, ModelRequest, ToolCallRequest
+from langchain.tools import tool
+
+@tool
+def calculate_tip(bill_amount: float, tip_percentage: float = 20.0) -> str:
+    """Calculate the tip amount for a bill."""
+    tip = bill_amount * (tip_percentage / 100)
+    return f"Tip: ${tip:.2f}, Total: ${bill_amount + tip:.2f}"
+
+class DynamicToolMiddleware(AgentMiddleware):
+    def wrap_model_call(self, request: ModelRequest, handler):
+        # ① ADD the tool so the model can see and call it (could come from an MCP server, DB, etc.)
+        return handler(request.override(tools=[*request.tools, calculate_tip]))
+
+    def wrap_tool_call(self, request: ToolCallRequest, handler):
+        # ② EXECUTE it — the agent has no other way to run a tool that wasn't in the original list
+        if request.tool_call["name"] == "calculate_tip":
+            return handler(request.override(tool=calculate_tip))
+        return handler(request)
+
+agent = create_agent(model="gpt-4o", tools=[get_weather], middleware=[DynamicToolMiddleware()])
+# The agent can now use BOTH get_weather (static) AND calculate_tip (added at runtime).
+```
+
+The `wrap_tool_call` hook is **required** here: `wrap_model_call` only advertises the tool to the model; without a `wrap_tool_call` that maps the name back to an implementation, the agent wouldn't know how to invoke a tool that wasn't in its original `tools=` list. (This is exactly how MCP tools get wired in — Part 8.)
+
+#### Advanced: headless tools
+
+Some work must run **where the user's app runs** (typically the browser), not in the agent process. A **headless tool** is *schema‑only on the server* — name, description, and arg schema, **no body** — and *implemented on the client*. Use it for browser‑only capabilities (geolocation, IndexedDB, clipboard, canvas, file pickers), for privacy/locality (data stays on the device), or to avoid a server round trip. It differs from an ordinary tool (whose body runs on the server) and from server‑side tool use (where the *provider* runs built‑ins remotely).
+
+The mechanism is an **interrupt/resume handshake** (the same durable‑pause machinery as human‑in‑the‑loop, Part 2's checkpointer): the server tool calls `interrupt(...)` with a structured payload instead of executing; the frontend runs the matching implementation and resumes the run with the result.
+
+**Server** — define schema‑only tools that interrupt with a `{"type": "tool", "tool_call": {...}}` payload:
+
+```python
+from typing import Any
+from langchain.agents import create_agent
+from langchain.tools import ToolRuntime, tool
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt
+from pydantic import BaseModel
+
+class MemoryPutInput(BaseModel):
+    key: str
+    value: Any
+
+def _interrupt_for_client(tool_name: str, args: dict[str, Any], runtime: ToolRuntime) -> Any:
+    return interrupt({                                    # pause the run; surface the call to the client
+        "type": "tool",
+        "tool_call": {"id": runtime.tool_call_id, "name": tool_name, "args": args},
+    })
+
+@tool("memory_put", description="Store a memory in the user's browser.", args_schema=MemoryPutInput)
+def memory_put(key: str, value: Any, runtime: ToolRuntime) -> Any:
+    return _interrupt_for_client("memory_put", {"key": key, "value": value}, runtime)
+
+agent = create_agent(
+    model="openai:gpt-5.4",
+    tools=[memory_put],            # the model calls it like any tool; execution defers to the client
+    checkpointer=MemorySaver(),    # required — the interrupt/resume handshake needs persistence
+)
+```
+
+Calling `tool(name=..., description=..., args_schema=...)` with **no function body** in Python returns a `HeadlessTool`. There is **no** `.implement()` on the Python side — that's JS‑only.
+
+**Client** — mirror the same name + schema, attach the real behavior with `.implement(...)`, and pass it to `useStream`. When the agent emits a matching tool call, the hook runs your implementation and resumes the run for you:
+
+```ts
+// tools.ts — mirror the server's tool name + schema
+import * as z from "zod";
+import { tool } from "langchain";
+export const memoryPut = tool({
+  name: "memory_put",
+  description: "Store a memory in the user's browser.",
+  schema: z.object({ key: z.string(), value: z.unknown() }),
+});
+
+// impl.ts — attach the browser-only behavior
+export const memoryPutImpl = memoryPut.implement(async ({ key, value }) => {
+  localStorage.setItem(`agent-memory:${key}`, JSON.stringify(value));   // runs in the browser
+  return { success: true, key };                                        // becomes the tool result
+});
+
+// Chat.tsx — wire implementations into useStream
+import { useStream } from "@langchain/react";
+const stream = useStream<AgentState>({
+  apiUrl: "http://localhost:2024",
+  assistantId: "headless_tools",
+  tools: [memoryPutImpl],          // hook runs the impl on a matching tool call, then resumes the run
+});
+```
+
+Render progress from `stream.toolCalls` (match `tc.call.id` to the message's tool‑call id), and pass an `onTool` callback to observe `start`/`success`/`error` lifecycle events (for spinners/toasts). Return only JSON‑serializable values, and pair with human‑in‑the‑loop for sensitive client actions. (The full frontend pattern — rendering tool cards, multiple tools — is in Part 10.)
 
 ### 1.4 Structured output — typed answers, not prose to parse
 
