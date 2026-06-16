@@ -143,6 +143,8 @@ flowchart TB
 **Read the map as a sentence:** You *build* an agent from the LangChain standard interface using `create_agent`, extend it with middleware (or jump to Deep Agents), and it *runs* on the LangGraph runtime. You *ground* it in data (RAG/SQL), *scale* it into multi‑agent systems, and connect tools via MCP. You *trust* it through LangSmith observability and evals, then *deliver* it via the LangGraph Platform to a rich frontend. The arrows are the seams we'll explain from both sides.
 
 With the altitude set, let's descend to the first layer: the standard interface that makes "use the best model without lock‑in" true.
+
+
 ---
 
 ## Part 1 — The Foundation: A Standard Interface to Models, Messages, Tools & Structured Output
@@ -454,6 +456,8 @@ flowchart TB
 ```
 
 **The through‑line:** a model takes messages, may *request* tool calls, you (or the harness) execute them into `ToolMessage`s, and the loop repeats until a final answer — optionally coerced into a typed schema. Everything in Part 2 is the automation of that loop.
+
+
 ---
 
 ## Part 2 — The Harness: `create_agent`
@@ -682,6 +686,8 @@ flowchart TD
 ```
 
 That dashed `checkpointer` line and the `Runtime` injection arrows are the doorways to LangGraph and middleware — the next two parts.
+
+
 ---
 
 ## Part 3 — LangGraph: The Orchestration Runtime Underneath
@@ -845,6 +851,8 @@ flowchart TB
 ```
 
 **One checkpointer, four superpowers** (durability, memory, HITL, time‑travel) — that single insight explains most of LangGraph's value. Everything `create_agent` does sits on top of this machine, which is why the agent inherits all of it.
+
+
 ---
 
 ## Part 4 — Middleware: The Extensibility Spine (and Context Engineering & Guardrails)
@@ -1104,6 +1112,8 @@ flowchart LR
 ```
 
 Memory management, guardrails, retries, summarization, dynamic prompts — **all the same machine**: a focused middleware reading a data source and pulling a context lever at a precise point in the loop.
+
+
 ---
 
 ## Part 5 — Deep Agents: The Batteries‑Included Harness
@@ -1216,6 +1226,8 @@ flowchart TD
 ```
 
 The lesson that ties Parts 2–5 together: **there is one harness (`create_agent`), one runtime (LangGraph), and one extension mechanism (middleware).** Deep Agents is a name for a well‑chosen pile of that extension mechanism.
+
+
 ---
 
 ## Part 6 — Grounding in Data: Retrieval, RAG, Knowledge Bases & SQL
@@ -1390,6 +1402,8 @@ flowchart TB
 ```
 
 High control + low flexibility on the left; low control + high flexibility on the right — same vector store, different harness wrapped around it.
+
+
 ---
 
 ## Part 7 — Scaling Out: Multi‑Agent Systems
@@ -1561,6 +1575,8 @@ flowchart TD
 ```
 
 Notice every leaf eventually points back at LangGraph — multi‑agent design is *graph* design with good naming.
+
+
 ---
 
 ## Part 8 — Interop: MCP (Model Context Protocol)
@@ -1681,6 +1697,8 @@ flowchart LR
 ```
 
 MCP closes the loop on tools: Part 1 gave the model hands you write; Part 8 gives it hands the whole world writes.
+
+
 ---
 
 ## Part 9 — Trust: Observability & Evaluation (LangSmith + Testing)
@@ -1821,6 +1839,8 @@ flowchart TD
 ```
 
 Capability without trust isn't production‑ready — which is exactly the gap LangChain set out to close.
+
+
 ---
 
 ## Part 10 — Delivery: Deployment, Studio, Frontend & Generative UI
@@ -2011,6 +2031,8 @@ flowchart TD
 ```
 
 The same compiled graph, named once in `langgraph.json`, flows from your editor to Studio to production to a reactive UI — without changing the agent code.
+
+
 ---
 
 ## Part 11 — The Whole Picture
@@ -2182,3 +2204,5 @@ pip install langchain-mcp-adapters       # MCP
 Every layer in this guide is a consequence of one sentence: **Agent = Model + Harness.** The model is the borrowed intelligence; the harness is everything you build around it to make that intelligence *reliable* — the loop, the memory, the tools, the guardrails, the runtime, the observability, the UI. LangChain's bet is that the harness, not the model, is where production reliability is won or lost — and the entire ecosystem is the toolkit for building that harness well.
 
 *— End of guide.*
+
+
